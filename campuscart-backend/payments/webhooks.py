@@ -20,7 +20,7 @@ def stripe_webhook(request):
     except ValueError:
         # Invalid payload
         return HttpResponse(status=400)
-    except stripe.error.SignatureVerificationError:
+    except stripe.SignatureVerificationError:
         # Invalid signature
         return HttpResponse(status=400)
 
@@ -54,7 +54,10 @@ def stripe_webhook(request):
         ])
 
         # Update or create Payment entry
-        payment, _ = Payment.objects.get_or_create(order=order)
+        payment, _ = Payment.objects.get_or_create(
+            order=order,
+            defaults={"amount": order.total_price, "method": "CARD"},
+        )
         payment.status = Order.PAYMENT_SUCCESS
         payment.provider_payment_id = payment_intent
         payment.save(update_fields=['status', 'provider_payment_id'])
