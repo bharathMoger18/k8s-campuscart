@@ -11,7 +11,9 @@ from django.contrib.auth.hashers import make_password
 
 from .serializers import RegisterSerializer, UserSerializer
 from .models import User
-from .utils import send_verification_email, send_password_reset_email
+from .utils import send_password_reset_email
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 
 User = get_user_model()
 
@@ -22,15 +24,15 @@ User = get_user_model()
 
 class RegisterView(generics.CreateAPIView):
     """
-    Handles user registration and automatically sends a verification email.
+    Handles user registration. Users are active immediately upon
+    registration — no email verification step required.
     """
     queryset = User.objects.all()
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
 
     def perform_create(self, serializer):
-        user = serializer.save(is_active=False)  # inactive until verified
-        send_verification_email(user, self.request)
+        user = serializer.save(is_active=True)
         return user
 
 
@@ -52,7 +54,7 @@ class MeView(APIView):
 
 
 # ---------------------------
-# Email Verification
+# Email Verification (kept for optional future re-enable; unused at registration)
 # ---------------------------
 
 class VerifyEmailView(APIView):
@@ -120,13 +122,6 @@ class PasswordResetConfirmView(APIView):
         return Response({"detail": "Password reset successful."})
 
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from django.contrib.auth import get_user_model
-
-User = get_user_model()
-
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def public_user_detail(request, user_id):
@@ -139,4 +134,3 @@ def public_user_detail(request, user_id):
         })
     except User.DoesNotExist:
         return Response({"detail": "User not found"}, status=404)
-
