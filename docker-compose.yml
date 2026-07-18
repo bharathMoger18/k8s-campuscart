@@ -1,0 +1,91 @@
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: campuscart-db
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: campuscart-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+
+  # ── Django + Daphne ─────────────────────────────────────────
+  web:
+    build:
+      context: ./campuscart-backend
+      dockerfile: Dockerfile
+    container_name: campuscart-web
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - staticfiles:/app/staticfiles
+      - media:/app/media
+    networks:
+      - backend_network
+      - frontend_network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/products/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Nginx ───────────────────────────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: campuscart-nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - staticfiles:/app/staticfiles
+      - media:/app/media
+      - ./frontend:/app/frontend
+    networks:
+      - frontend_network
+    depends_on:
+      web:
+        condition: service_healthy
+
+networks:
+  frontend_network:
+    driver: bridge
+  backend_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  staticfiles:
+  media:

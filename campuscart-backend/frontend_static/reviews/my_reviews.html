@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>My Reviews — CampusCart</title>
+    <link rel="stylesheet" href="/css/base.css" />
+    <link rel="stylesheet" href="/css/layout.css" />
+    <link rel="stylesheet" href="/css/components.css" />
+    <style>
+      .page-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;margin-bottom:2rem}
+      .page-header h1{font-family:var(--font-display);font-size:1.8rem;font-weight:800;letter-spacing:-.03em;color:var(--text)}
+      .filter-controls select{background:var(--bg-3);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:.55rem .85rem;font-size:.88rem;outline:none;cursor:pointer}
+      .reviews-list{display:flex;flex-direction:column;gap:.85rem}
+      .review-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;transition:border-color var(--transition)}
+      .review-card:hover{border-color:rgba(108,99,255,.25)}
+      .review-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem;flex-wrap:wrap;gap:.5rem}
+      .review-header h3{font-family:var(--font-display);font-size:1rem;font-weight:700;color:var(--text);margin:0}
+      .review-actions{display:flex;gap:.4rem;flex-wrap:wrap}
+      .review-meta{font-size:.78rem;color:var(--text-3);margin:.25rem 0}
+      .rating-stars{color:var(--warning);font-size:1rem;margin:.35rem 0}
+      .review-comment{color:var(--text-2);font-size:.88rem;line-height:1.6;margin:.5rem 0}
+      .edit-form{margin-top:1rem;background:var(--bg-3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem;display:none}
+      .edit-form.show{display:block}
+      .edit-form label{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);display:block;margin-bottom:.3rem}
+      .edit-form input[type=number]{width:80px;margin-bottom:.75rem}
+      .edit-form textarea{width:100%;min-height:80px;resize:vertical;margin-bottom:.75rem}
+      .edit-actions{display:flex;gap:.5rem}
+      .btn-link{background:var(--bg-3);border:1px solid var(--border);color:var(--primary-light);padding:.35rem .8rem;border-radius:var(--radius-sm);font-size:.8rem;font-weight:600;text-decoration:none;transition:all var(--transition)}
+      .btn-link:hover{border-color:var(--primary)}
+      .btn-outline{background:rgba(108,99,255,.1);border:1px solid rgba(108,99,255,.2);color:var(--primary-light);padding:.35rem .8rem;border-radius:var(--radius-sm);font-size:.8rem;font-weight:600;cursor:pointer;transition:all var(--transition);font-family:var(--font-body)}
+      .btn-outline:hover{background:rgba(108,99,255,.2)}
+      .btn-secondary{background:var(--bg-3);border:1px solid var(--border);color:var(--text-2);padding:.35rem .8rem;border-radius:var(--radius-sm);font-size:.8rem;font-weight:600;cursor:pointer;transition:all var(--transition);font-family:var(--font-body)}
+      .pagination{display:flex;gap:.4rem;justify-content:center;margin-top:1.5rem;flex-wrap:wrap}
+      .page-btn{padding:.4rem .85rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-3);color:var(--text-2);cursor:pointer;font-size:.85rem;font-weight:600;transition:all var(--transition)}
+      .page-btn.active{background:var(--primary);border-color:var(--primary);color:#fff}
+      .page-btn:hover:not(.active){border-color:var(--primary);color:var(--primary-light)}
+    </style>
+  </head>
+  <body>
+    <header id="site-navbar"></header>
+    <main class="container">
+      <div class="page-header">
+        <h1>My Reviews</h1>
+        <div class="filter-controls">
+          <select id="sortSelect">
+            <option value="-created_at">Newest First</option>
+            <option value="created_at">Oldest First</option>
+            <option value="-rating">Highest Rating</option>
+            <option value="rating">Lowest Rating</option>
+          </select>
+        </div>
+      </div>
+      <section id="reviewsSection" class="reviews-list">
+        <div class="loading">Loading your reviews...</div>
+      </section>
+      <div id="paginationContainer" class="pagination"></div>
+    </main>
+    <footer id="site-footer"></footer>
+    <script type="module" src="/js/main.js"></script>
+    <script type="module" src="/js/reviews.js"></script>
+  </body>
+</html>

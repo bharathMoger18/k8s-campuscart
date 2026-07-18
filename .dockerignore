@@ -1,0 +1,27 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment
+.env
+*.env
+
+# Git
+.git/
+.gitignore
+
+# Django
+campuscart-backend/db.sqlite3
+campuscart-backend/staticfiles/
+campuscart-backend/media/
+
+# Editor
+*.swp
+*.swo
+
+# Docker
+docker-compose.yml
