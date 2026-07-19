@@ -11,6 +11,9 @@ class Conversation(models.Model):
     participants = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="conversations")
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        ordering = ("-created_at",)
+
     def __str__(self):
         return f"Conversation {self.id} (product={self.product_id})"
 
