@@ -1,0 +1,41 @@
+# --- Secrets: NEVER let these into a build context ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+venv/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# --- Django dev artifacts ---
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+media/
+
+# --- Version control (irrelevant inside an image) ---
+.git/
+.gitignore
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Test artifacts ---
+.coverage
+htmlcov/
+.pytest_cache/
+
+# --- Local docs not needed at runtime ---
+README.md

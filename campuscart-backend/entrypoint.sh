@@ -17,16 +17,24 @@ python manage.py migrate --noinput
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 
-echo "Creating superuser if not exists..."
-python manage.py shell -c "
+echo "Checking for optional superuser bootstrap..."
+if [ -n "$DJANGO_SUPERUSER_EMAIL" ] && [ -n "$DJANGO_SUPERUSER_PASSWORD" ]; then
+    python manage.py shell -c "
 from django.contrib.auth import get_user_model
+import os
 User = get_user_model()
-if not User.objects.filter(email='admin@campuscart.com').exists():
-    User.objects.create_superuser(email='admin@campuscart.com', password='Admin@1234', name='Admin')
-    print('Superuser created')
+email = os.environ['DJANGO_SUPERUSER_EMAIL']
+password = os.environ['DJANGO_SUPERUSER_PASSWORD']
+name = os.environ.get('DJANGO_SUPERUSER_NAME', 'Admin')
+if not User.objects.filter(email=email).exists():
+    User.objects.create_superuser(email=email, password=password, name=name)
+    print(f'Superuser {email} created')
 else:
-    print('Superuser already exists')
+    print(f'Superuser {email} already exists')
 "
+else
+    echo "DJANGO_SUPERUSER_EMAIL/PASSWORD not set — skipping superuser bootstrap."
+fi
 
 echo "Starting Daphne..."
 exec daphne -b 0.0.0.0 -p 8000 campuscart.asgi:application
