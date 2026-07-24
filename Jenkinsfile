@@ -177,13 +177,33 @@ spec:
   # the container, so with zero shell present, every step would fail
   # instantly. :debug includes a tiny busybox shell specifically so tools
   # like Jenkins can drive it interactively.
-  - name: kaniko
+  #
+  # TWO SEPARATE containers, one per image, rather than one container
+  # running both builds sequentially. Kaniko builds images by taking full
+  # filesystem snapshots after each instruction — genuinely memory-hungry,
+  # especially compiling gcc + ~70 Python packages. Running both builds in
+  # ONE container means the second build inherits whatever memory the first
+  # left allocated in that same cgroup, risking an OOM kill. Separate
+  # containers means separate memory ceilings — one build can never starve
+  # the other.
+  - name: kaniko-web
     image: gcr.io/kaniko-project/executor:debug
     command: ["cat"]
     tty: true
     resources:
       requests:
         cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+  - name: kaniko-nginx
+    image: gcr.io/kaniko-project/executor:debug
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "250m"
         memory: "512Mi"
       limits:
         cpu: "1"
@@ -192,7 +212,7 @@ spec:
                 }
             }
             steps {
-                container('kaniko') {
+                container('kaniko-web') {
                     unstash 'source'
 
                     // --insecure / --insecure-pull: our registry serves
@@ -211,6 +231,10 @@ spec:
                           --insecure-pull \
                           --cache=true
                     '''
+                }
+
+                container('kaniko-nginx') {
+                    unstash 'source'
 
                     sh '''
                         /kaniko/executor \
