@@ -30,6 +30,17 @@ spec:
             steps {
                 container('git') {
                     checkout scm
+                    // Capture the commit SHA HERE, in the one stage that
+                    // actually has git available. Later stages (Kaniko,
+                    // deploy) don't have git installed at all — they're
+                    // minimal, purpose-built images, not general Linux
+                    // boxes. env.X set here persists for the WHOLE pipeline
+                    // run (it lives in Jenkins' build context, not inside
+                    // any one pod), so every later stage can just read
+                    // env.IMAGE_TAG directly, no matter which pod it's in.
+                    script {
+                        env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    }
                     // Stash the checked-out code so LATER stages (which run
                     // in COMPLETELY DIFFERENT pods) can retrieve it. Each
                     // stage's pod is created fresh and torn down after —
@@ -146,6 +157,69 @@ spec:
                     sh '''
                         cd campuscart-backend
                         python manage.py test --verbosity=2
+                    '''
+                }
+            }
+        }
+
+        stage('Build and Push Images') {
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  # MUST use the :debug tag, not the minimal distroless production tag.
+  # The distroless Kaniko image has NO shell binary at all — Jenkins'
+  # Kubernetes plugin runs every pipeline step by exec-ing a shell inside
+  # the container, so with zero shell present, every step would fail
+  # instantly. :debug includes a tiny busybox shell specifically so tools
+  # like Jenkins can drive it interactively.
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+'''
+                }
+            }
+            steps {
+                container('kaniko') {
+                    unstash 'source'
+
+                    // --insecure / --insecure-pull: our registry serves
+                    // plain HTTP, no TLS. Kaniko otherwise assumes HTTPS
+                    // and would refuse to push. This is fine for a local,
+                    // personal registry — a real company's registry would
+                    // have real TLS, and these flags simply wouldn't exist
+                    // in that pipeline.
+                    sh '''
+                        /kaniko/executor \
+                          --context=dir://$(pwd)/campuscart-backend \
+                          --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
+                          --destination=192.168.1.3:5000/campuscart-web:${IMAGE_TAG} \
+                          --destination=192.168.1.3:5000/campuscart-web:latest \
+                          --insecure \
+                          --insecure-pull \
+                          --cache=true
+                    '''
+
+                    sh '''
+                        /kaniko/executor \
+                          --context=dir://$(pwd)/nginx \
+                          --dockerfile=$(pwd)/nginx/Dockerfile \
+                          --destination=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} \
+                          --destination=192.168.1.3:5000/campuscart-nginx:latest \
+                          --insecure \
+                          --insecure-pull \
+                          --cache=true
                     '''
                 }
             }
