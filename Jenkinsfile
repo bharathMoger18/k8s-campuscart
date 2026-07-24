@@ -39,6 +39,7 @@ spec:
                     // any one pod), so every later stage can just read
                     // env.IMAGE_TAG directly, no matter which pod it's in.
                     script {
+                        sh 'git config --global --add safe.directory "$(pwd)"'
                         env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                     }
                     // Stash the checked-out code so LATER stages (which run
