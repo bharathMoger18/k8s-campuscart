@@ -9,7 +9,10 @@ class ProductSerializer(serializers.ModelSerializer):
     total_reviews = serializers.IntegerField(read_only=True)
     rating_breakdown = serializers.SerializerMethodField()
     reviews = serializers.SerializerMethodField()
-    image = serializers.SerializerMethodField()
+    image = serializers.ImageField(
+        required=False,
+        allow_null=True
+    )
 
     class Meta:
         model = Product
@@ -20,15 +23,9 @@ class ProductSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         ]
 
-    def get_image(self, obj):
-        if obj.image:
-            return '/media/' + str(obj.image)
-        return None
-
     def get_rating_breakdown(self, obj):
         return obj.rating_breakdown()
 
     def get_reviews(self, obj):
         reviews = obj.reviews.select_related("user").all()
         return ReviewSerializer(reviews, many=True).data
-    
