@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import Product
 from reviews.serializers import ReviewSerializer
 
+
 class ProductSerializer(serializers.ModelSerializer):
     owner_email = serializers.EmailField(source="owner.email", read_only=True)
     owner_id = serializers.IntegerField(source="owner.id", read_only=True)
@@ -22,6 +23,16 @@ class ProductSerializer(serializers.ModelSerializer):
             "total_reviews", "rating_breakdown", "reviews",
             "created_at", "updated_at",
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        if instance.image:
+            data["image"] = "/media/" + str(instance.image)
+        else:
+            data["image"] = None
+
+        return data
 
     def get_rating_breakdown(self, obj):
         return obj.rating_breakdown()
