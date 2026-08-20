@@ -247,7 +247,7 @@ spec:
   serviceAccountName: jenkins-deployer
   containers:
   - name: kubectl
-    image: bitnami/kubectl:1.29
+    image: bitnami/kubectl:latest
     command: ["cat"]
     tty: true
     resources:
