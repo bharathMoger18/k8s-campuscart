@@ -1,0 +1,45 @@
+# jenkins-deployer-rbac.yaml
+# A SEPARATE identity from jenkins-agent, deliberately. jenkins-agent can
+# only create/manage build Pods in jenkins-agents — it has NO permission to
+# touch k8s-campuscart at all. This ServiceAccount is the opposite: it can
+# ONLY update Deployments in k8s-campuscart, nothing else, not even Pods or
+# Secrets there. Least privilege applied per-task, not just per-pipeline.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-deployer
+  namespace: jenkins-agents
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-deployer-role
+  namespace: k8s-campuscart
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+  # Needed so `kubectl rollout status` can watch the Deployment come up
+  # and give the pipeline a real pass/fail signal, not just "apply succeeded."
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-deployer-binding
+  namespace: k8s-campuscart
+subjects:
+  # Note: this ServiceAccount lives in jenkins-agents (where all our build
+  # Pods already run), but the Role it's bound to is scoped to a DIFFERENT
+  # namespace, k8s-campuscart. RoleBindings allow this — the subject's
+  # namespace and the Role's namespace don't have to match.
+  - kind: ServiceAccount
+    name: jenkins-deployer
+    namespace: jenkins-agents
+roleRef:
+  kind: Role
+  name: jenkins-deployer-role
+  apiGroup: rbac.authorization.k8s.io

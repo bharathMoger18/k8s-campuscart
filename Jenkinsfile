@@ -67,9 +67,7 @@ spec:
   # Jenkins needs this container to stay alive indefinitely so it can
   # `kubectl exec` into it once per pipeline step. `cat` with a tty attached
   # is the standard, well-known trick for this: a trivial, harmless process
-  # that never exits on its own. Without this, the container would start,
-  # have nothing to do, and immediately exit — and Jenkins would have
-  # nothing left to exec into.
+  # that never exits on its own.
   - name: python
     image: python:3.12-slim
     command: ["cat"]
@@ -82,13 +80,9 @@ spec:
         cpu: "1"
         memory: "1Gi"
     env:
-      # These are TEST-ONLY, throwaway values scoped to an ephemeral pod
-      # that's destroyed the moment this stage ends. This is NOT the same
-      # category of risk as a real production secret — there is nothing
-      # real behind these credentials, and no real database anyone could
-      # reach with them after this pod dies. Hardcoding them directly in
-      # the Jenkinsfile here is a legitimate, common practice for CI-only
-      # values.
+      # TEST-ONLY, throwaway values scoped to an ephemeral pod destroyed
+      # the moment this stage ends — not the same risk category as a real
+      # production secret.
       - name: DB_HOST
         value: "localhost"
       - name: DB_PORT
@@ -139,10 +133,7 @@ spec:
 
                     // A pod's containers all START roughly in parallel —
                     // "Running" does NOT mean "ready to accept connections."
-                    // Postgres takes a moment to initialize even after its
-                    // process starts. This is the EXACT same principle as
-                    // entrypoint.sh's wait-for-postgres logic, just applied
-                    // at the CI layer instead of the app-runtime layer.
+                    // Same principle as entrypoint.sh's wait-for-postgres logic.
                     sh '''
                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
@@ -175,17 +166,14 @@ spec:
   # The distroless Kaniko image has NO shell binary at all — Jenkins'
   # Kubernetes plugin runs every pipeline step by exec-ing a shell inside
   # the container, so with zero shell present, every step would fail
-  # instantly. :debug includes a tiny busybox shell specifically so tools
-  # like Jenkins can drive it interactively.
+  # instantly.
   #
   # TWO SEPARATE containers, one per image, rather than one container
-  # running both builds sequentially. Kaniko builds images by taking full
-  # filesystem snapshots after each instruction — genuinely memory-hungry,
-  # especially compiling gcc + ~70 Python packages. Running both builds in
-  # ONE container means the second build inherits whatever memory the first
-  # left allocated in that same cgroup, risking an OOM kill. Separate
-  # containers means separate memory ceilings — one build can never starve
-  # the other.
+  # running both builds sequentially. Kaniko is memory-hungry (full
+  # filesystem snapshots after each instruction) — running both builds in
+  # ONE container risks the second build inheriting memory pressure from
+  # the first and getting OOM-killed. Separate containers = separate
+  # memory ceilings.
   - name: kaniko-web
     image: gcr.io/kaniko-project/executor:debug
     command: ["cat"]
@@ -214,13 +202,9 @@ spec:
             steps {
                 container('kaniko-web') {
                     unstash 'source'
-
                     // --insecure / --insecure-pull: our registry serves
-                    // plain HTTP, no TLS. Kaniko otherwise assumes HTTPS
-                    // and would refuse to push. This is fine for a local,
-                    // personal registry — a real company's registry would
-                    // have real TLS, and these flags simply wouldn't exist
-                    // in that pipeline.
+                    // plain HTTP, no TLS. A real company's registry would
+                    // have real TLS and these flags simply wouldn't exist.
                     sh '''
                         /kaniko/executor \
                           --context=dir://$(pwd)/campuscart-backend \
@@ -235,7 +219,6 @@ spec:
 
                 container('kaniko-nginx') {
                     unstash 'source'
-
                     sh '''
                         /kaniko/executor \
                           --context=dir://$(pwd)/nginx \
@@ -245,6 +228,50 @@ spec:
                           --insecure \
                           --insecure-pull \
                           --cache=true
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  # This is the ONLY stage using this ServiceAccount — it's what actually
+  # grants kubectl inside this Pod permission to update Deployments in
+  # k8s-campuscart. Every other stage uses the default jenkins-agent
+  # identity, which CANNOT do this — least privilege applied per-task.
+  serviceAccountName: jenkins-deployer
+  containers:
+  - name: kubectl
+    image: bitnami/kubectl:1.29
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+'''
+                }
+            }
+            steps {
+                container('kubectl') {
+                    sh '''
+                        kubectl set image deployment/web web=192.168.1.3:5000/campuscart-web:${IMAGE_TAG} -n k8s-campuscart
+                        kubectl set image deployment/nginx nginx=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} -n k8s-campuscart
+
+                        # rollout status BLOCKS until the new Pods are actually
+                        # Ready (or fails after the timeout) — this turns
+                        # "I told Kubernetes to update" into a real pass/fail
+                        # signal for the pipeline, not fire-and-forget.
+                        kubectl rollout status deployment/web -n k8s-campuscart --timeout=180s
+                        kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
                     '''
                 }
             }
