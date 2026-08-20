@@ -41,6 +41,13 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
+          volumeMounts:
+            - name: campuscart-shared
+              mountPath: /app/staticfiles
+              subPath: staticfiles
+            - name: campuscart-shared
+              mountPath: /app/media
+              subPath: media
           readinessProbe:
             tcpSocket:
               port: 80
@@ -58,3 +65,7 @@ spec:
             limits:
               cpu: "250m"
               memory: "256Mi"
+      volumes:
+        - name: campuscart-shared
+          persistentVolumeClaim:
+            claimName: campuscart-shared
