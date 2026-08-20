@@ -247,8 +247,9 @@ spec:
   serviceAccountName: jenkins-deployer
   containers:
   - name: kubectl
-    image: bitnami/kubectl:latest
-    command: ["cat"]
+    image: alpine/k8s:1.29.15
+    command:
+    - cat
     tty: true
     resources:
       requests:
