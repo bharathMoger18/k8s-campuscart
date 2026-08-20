@@ -221,7 +221,7 @@ spec:
                     unstash 'source'
                     sh '''
                         /kaniko/executor \
-                          --context=dir://$(pwd)/nginx \
+                          --context=dir://$(pwd) \
                           --dockerfile=$(pwd)/nginx/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} \
                           --destination=192.168.1.3:5000/campuscart-nginx:latest \
