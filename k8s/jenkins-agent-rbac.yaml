@@ -1,0 +1,44 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-agent-role
+  namespace: jenkins-agents
+rules:
+  # Jenkins needs to create, watch, and delete pods — this is literally
+  # how it spins up an agent per build and tears it down afterward.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch", "update"]
+  # Reading pod logs lets Jenkins stream the build's console output
+  # back to the controller UI in real time.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Needed so Jenkins can exec into the agent pod to run build steps.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  # Read-only access to secrets in this namespace — needed later for
+  # the registry credentials Kaniko will use to authenticate pushes.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Events help Jenkins report WHY a pod failed to schedule (e.g.
+  # insufficient resources), rather than just "it didn't work."
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-agent-binding
+  namespace: jenkins-agents
+subjects:
+  - kind: ServiceAccount
+    name: jenkins-agent
+    namespace: jenkins-agents
+roleRef:
+  kind: Role
+  name: jenkins-agent-role
+  apiGroup: rbac.authorization.k8s.io

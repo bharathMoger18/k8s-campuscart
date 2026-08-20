@@ -1,0 +1,102 @@
+# postgres.yaml
+# Deploys Postgres as a StatefulSet — the correct primitive for a database,
+# because each replica needs a STABLE identity and its OWN dedicated storage
+# that survives Pod rescheduling, unlike a Deployment's interchangeable Pods.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: k8s-campuscart
+spec:
+  # clusterIP: None makes this a "headless" Service — it doesn't load-balance
+  # or get a single virtual IP. Instead, DNS resolves DIRECTLY to the
+  # individual Pod's IP (postgres-0.postgres.campuscart.svc.cluster.local).
+  # This is what gives a StatefulSet's Pods their stable, individually
+  # addressable network identity — essential for a database where you often
+  # need to reach a SPECIFIC replica (e.g. the primary), not "any one of them."
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: k8s-campuscart
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: campuscart-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: campuscart-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: campuscart-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+              # Postgres stores an internal marker in the root of the data
+              # dir; NFS volumes sometimes leave a lost+found folder that
+              # confuses Postgres's "is this directory truly empty" check.
+              # A subPath gives Postgres its own clean subdirectory instead
+              # of the raw NFS mount root.
+              subPath: postgres-data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+  # volumeClaimTemplates: this is what makes a StatefulSet special. Instead
+  # of one shared PVC, Kubernetes creates a UNIQUE PVC per replica
+  # (postgres-data-postgres-0, postgres-data-postgres-1, ...), each
+  # provisioned automatically by your NFS StorageClass. If postgres-0 is
+  # rescheduled to a different node, it reattaches to THIS SAME PVC —
+  # the data follows the identity, not the node.
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: nfs-storage
+        resources:
+          requests:
+            storage: 2Gi

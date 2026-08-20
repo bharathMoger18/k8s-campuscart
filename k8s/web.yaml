@@ -1,0 +1,81 @@
+# web.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: k8s-campuscart
+spec:
+  # ClusterIP (the default): only reachable from WITHIN the cluster.
+  # nginx is the only thing that should ever talk to Django directly —
+  # the outside world only ever reaches nginx.
+  selector:
+    app: web
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: k8s-campuscart
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          # Pinned to the exact commit-SHA tag Kaniko built and pushed —
+          # NOT ':latest'. Kubernetes treats ':latest' specially: its
+          # default imagePullPolicy is ALWAYS re-pull, every single Pod
+          # start, even if nothing changed — slower, and worse, it means
+          # "what's actually running" can silently drift over time since
+          # latest a moment ago might not be latest now. A specific tag
+          # is reproducible: this exact Deployment always means this
+          # exact, known image, forever.
+          image: 192.168.1.3:5000/campuscart-web:37be2f9
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: campuscart-config
+            - secretRef:
+                name: campuscart-secrets
+          # startupProbe: gives the container up to 300s (30 x 10s) to
+          # finish migrations/collectstatic before readiness/liveness
+          # even start being checked — without this, a slow first boot
+          # could get liveness-killed before it ever finished starting.
+          startupProbe:
+            httpGet:
+              path: /api/v1/products/
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/products/
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/v1/products/
+              port: 8000
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

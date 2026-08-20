@@ -1,0 +1,16 @@
+# configmap.yaml
+# Non-sensitive settings — the same "config injected, never baked in"
+# principle as Docker, just expressed as a Kubernetes object now.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: campuscart-config
+  namespace: k8s-campuscart
+data:
+  DEBUG: "False"
+  ALLOWED_HOSTS: "*"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  FRONTEND_URL: "http://localhost:8080"
