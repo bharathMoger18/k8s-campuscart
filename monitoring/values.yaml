@@ -1,0 +1,48 @@
+# ================================================================
+# CampusCart Monolith — Prometheus + Grafana Monitoring Stack
+# Namespace: k8s-monitoring
+# ================================================================
+
+server:
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  persistentVolume:
+    enabled: false
+  retention: "7d"
+  service:
+    type: NodePort
+    nodePort: 30090
+
+alertmanager:
+  enabled: true
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "10m"
+    limits:
+      memory: "128Mi"
+      cpu: "50m"
+
+nodeExporter:
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "10m"
+    limits:
+      memory: "64Mi"
+      cpu: "50m"
+
+pushgateway:
+  enabled: false
+
+extraScrapeConfigs: |
+  - job_name: 'campuscart-web'
+    static_configs:
+      - targets: ['web.k8s-campuscart.svc.cluster.local:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
