@@ -3,6 +3,7 @@
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_decode
@@ -12,6 +13,9 @@ from django.contrib.auth.hashers import make_password
 from .serializers import RegisterSerializer, UserSerializer
 from .models import User
 from .utils import send_password_reset_email
+from .metrics import user_registrations_total
+from .metrics import user_logins_total
+from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 
@@ -31,8 +35,17 @@ class RegisterView(generics.CreateAPIView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
 
+    def create(self, request, *args, **kwargs):
+        try:
+            response = super().create(request, *args, **kwargs)
+        except ValidationError:
+            user_registrations_total.labels(status="failed").inc()
+            raise
+        return response
+
     def perform_create(self, serializer):
         user = serializer.save(is_active=True)
+        user_registrations_total.labels(status="success").inc()
         return user
 
 
@@ -134,3 +147,22 @@ def public_user_detail(request, user_id):
         })
     except User.DoesNotExist:
         return Response({"detail": "User not found"}, status=404)
+
+
+# ---------------------------
+# Login (wraps SimpleJWT's token view to observe outcomes)
+# ---------------------------
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    """
+    Same behavior as SimpleJWT's TokenObtainPairView — only difference
+    is recording a login metric around the real logic, transparently.
+    """
+    def post(self, request, *args, **kwargs):
+        try:
+            response = super().post(request, *args, **kwargs)
+        except Exception:
+            user_logins_total.labels(result="failed").inc()
+            raise
+        user_logins_total.labels(result="success").inc()
+        return response

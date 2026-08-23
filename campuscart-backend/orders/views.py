@@ -7,6 +7,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import models
 from .utils import process_refund
+from .metrics import orders_created_total, order_processing_duration_seconds
 
 import logging
 
@@ -49,7 +50,6 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     # ----------------------------------------------------------------------
     # 🧱 CREATE FROM CART
-    # (unchanged)
     # ----------------------------------------------------------------------
     @action(detail=False, methods=["post"], url_path="create")
     def create_from_cart(self, request):
@@ -59,6 +59,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             payment_method = "COD"
         items_qs = cart.items.select_related("product", "product__owner").all()
         if not items_qs.exists():
+            orders_created_total.labels(status="failed").inc()
             return Response({"detail": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST)
 
         groups = defaultdict(list)
@@ -71,57 +72,61 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 groups[prod.owner].append(ci)
 
         if invalid:
+            orders_created_total.labels(status="failed").inc()
             return Response({"detail": "Some products unavailable", "products": invalid},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        created_orders, created_cart_item_ids = [], []
-        for seller, cart_items in groups.items():
-            order = Order.objects.create(
-                buyer=request.user,
-                seller=seller,
-                total_price=Decimal("0.00"),
-            )
-            Payment.objects.create(
-                order=order,
-                method="CARD" if payment_method == "ONLINE" else "COD",
-                amount=order.total_price,
-                status=Order.PAYMENT_PENDING if payment_method == "COD" else Order.PAYMENT_SUCCESS,
-            )
-            total = Decimal("0.00")
-            for ci in cart_items:
-                prod = ci.product
-                OrderItem.objects.create(
-                    order=order,
-                    product=prod,
-                    product_title=prod.title,
-                    price=prod.price,
-                    quantity=ci.quantity
+        with order_processing_duration_seconds.time():
+            created_orders, created_cart_item_ids = [], []
+            for seller, cart_items in groups.items():
+                order = Order.objects.create(
+                    buyer=request.user,
+                    seller=seller,
+                    total_price=Decimal("0.00"),
                 )
-                total += prod.price * ci.quantity
-                created_cart_item_ids.append(ci.id)
-            order.total_price = total
-            order.save()
-            created_orders.append(order)
+                Payment.objects.create(
+                    order=order,
+                    method="CARD" if payment_method == "ONLINE" else "COD",
+                    amount=order.total_price,
+                    status=Order.PAYMENT_PENDING if payment_method == "COD" else Order.PAYMENT_SUCCESS,
+                )
+                total = Decimal("0.00")
+                for ci in cart_items:
+                    prod = ci.product
+                    OrderItem.objects.create(
+                        order=order,
+                        product=prod,
+                        product_title=prod.title,
+                        price=prod.price,
+                        quantity=ci.quantity
+                    )
+                    total += prod.price * ci.quantity
+                    created_cart_item_ids.append(ci.id)
+                order.total_price = total
+                order.save()
+                created_orders.append(order)
+                orders_created_total.labels(status="success").inc()
 
-            # create initial history
-            OrderStatusHistory.objects.create(
-                order=order,
-                from_status="",
-                to_status=Order.STATUS_PENDING,
-                actor=request.user,
-                note="Order placed",
-                timestamp=order.created_at
-            )
+                # create initial history
+                OrderStatusHistory.objects.create(
+                    order=order,
+                    from_status="",
+                    to_status=Order.STATUS_PENDING,
+                    actor=request.user,
+                    note="Order placed",
+                    timestamp=order.created_at
+                )
 
-            send_push_to_user(
-                seller,
-                "🛍 New Order Received",
-                f"{request.user.name or request.user.email} placed an order for {len(cart_items)} item(s).",
-                url=f"/orders/{order.id}/",
-                type_="order"
-            )
+                send_push_to_user(
+                    seller,
+                    "🛍 New Order Received",
+                    f"{request.user.name or request.user.email} placed an order for {len(cart_items)} item(s).",
+                    url=f"/orders/{order.id}/",
+                    type_="order"
+                )
 
-        CartItem.objects.filter(id__in=created_cart_item_ids).delete()
+            CartItem.objects.filter(id__in=created_cart_item_ids).delete()
+
         serializer = OrderSerializer(created_orders, many=True, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -437,8 +442,8 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "No reviews created", "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"created": created, "errors": errors}, status=status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST)
-    
-        # ----------------------------------------------------------------------
+
+    # ----------------------------------------------------------------------
     # 🧩 SELLER DASHBOARD ANALYTICS
     # ----------------------------------------------------------------------
     @action(detail=False, methods=["get"], url_path="seller/dashboard")
@@ -523,7 +528,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         }
 
         return Response(data, status=status.HTTP_200_OK)
-    
+
     @action(detail=True, methods=["post"], url_path="refund_request")
     def refund_request(self, request, pk=None):
         """Buyer requests refund for a paid/completed order."""
@@ -555,8 +560,8 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(RefundRequestSerializer(refund).data, status=201)
 
-        
-    
+
+
     @action(detail=True, methods=["patch"], url_path="refund_decision")
     def refund_decision(self, request, pk=None):
         """
@@ -646,7 +651,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         if not hasattr(order, "refund_request"):
             return Response({"refund": None})
         return Response(RefundRequestSerializer(order.refund_request).data)
-    
+
 
     @action(detail=False, methods=["get"], url_path="seller/orders")
     def seller_orders(self, request):
@@ -667,7 +672,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         serializer = OrderSerializer(orders, many=True, context={"request": request})
         return Response(serializer.data)
-    
+
 
     @action(detail=False, methods=["get"], url_path=r"seller/orders/(?P<order_id>\d+)")
     def seller_order_detail(self, request, order_id=None):
@@ -691,6 +696,3 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         serializer = OrderSerializer(order, context={"request": request})
         return Response(serializer.data)
-
-
-

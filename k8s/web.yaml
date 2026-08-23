@@ -4,6 +4,8 @@ kind: Service
 metadata:
   name: web
   namespace: k8s-campuscart
+  labels:
+    app: web
 spec:
   # ClusterIP (the default): only reachable from WITHIN the cluster.
   # nginx is the only thing that should ever talk to Django directly —
@@ -11,7 +13,8 @@ spec:
   selector:
     app: web
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
 ---
 apiVersion: apps/v1

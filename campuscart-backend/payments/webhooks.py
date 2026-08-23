@@ -4,6 +4,7 @@ from django.conf import settings
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from orders.models import Order, Payment
+from .metrics import payment_webhook_events_total, payment_amount_captured_total
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
@@ -19,9 +20,11 @@ def stripe_webhook(request):
         )
     except ValueError:
         # Invalid payload
+        payment_webhook_events_total.labels(event_type="unknown", result="invalid_payload").inc()
         return HttpResponse(status=400)
     except stripe.SignatureVerificationError:
         # Invalid signature
+        payment_webhook_events_total.labels(event_type="unknown", result="invalid_signature").inc()
         return HttpResponse(status=400)
 
     # ✅ Handle successful checkout
@@ -36,6 +39,7 @@ def stripe_webhook(request):
             order = Order.objects.get(stripe_session_id=session_id)
         except Order.DoesNotExist:
             print("⚠️ No order found for session:", session_id)
+            payment_webhook_events_total.labels(event_type="checkout.session.completed", result="order_not_found").inc()
             return HttpResponse(status=404)
 
         # Update order status and payment info
@@ -62,6 +66,14 @@ def stripe_webhook(request):
         payment.provider_payment_id = payment_intent
         payment.save(update_fields=['status', 'provider_payment_id'])
 
+        payment_webhook_events_total.labels(event_type="checkout.session.completed", result="success").inc()
+        payment_amount_captured_total.inc(float(order.total_price))
+
         print(f"✅ Order #{order.id} marked as PAID.")
+
+    else:
+        # Any Stripe event type we don't explicitly handle yet (refunds, disputes, etc.)
+        # Still counted, so we have visibility instead of silent 200s.
+        payment_webhook_events_total.labels(event_type=event['type'], result="ignored").inc()
 
     return HttpResponse(status=200)

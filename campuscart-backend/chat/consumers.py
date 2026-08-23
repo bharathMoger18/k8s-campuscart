@@ -7,6 +7,7 @@ from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 
 from .models import Conversation, Message
+from .metrics import chat_active_connections
 from push.utils import notify_users_about_message, send_push_to_user
 
 User = get_user_model()
@@ -15,6 +16,7 @@ User = get_user_model()
 class ChatConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         """Authenticate user and join conversation group."""
+        self._counted_in_metrics = False
         self.conversation_id = self.scope["url_route"]["kwargs"]["conversation_id"]
 
         # Authenticate via JWT token
@@ -33,10 +35,15 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         await self.channel_layer.group_add(self.room_group_name, self.channel_name)
         await self.accept()
 
+        chat_active_connections.inc()
+        self._counted_in_metrics = True
+
         await self.send_json({"message": "Connected successfully."})
 
     async def disconnect(self, code):
         """Remove from group on disconnect."""
+        if getattr(self, "_counted_in_metrics", False):
+            chat_active_connections.dec()
         await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
 
     # -------------------------------------------------------------------------

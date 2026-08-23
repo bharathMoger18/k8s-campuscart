@@ -35,6 +35,7 @@ urlpatterns = [
     path("api/v1/", include(("campuscart.api_urls", "api"), namespace="v1")),
     path("api/v1/payments/", include("payments.urls")),
     path("sw.js", service_worker, name="service-worker"),
+    path("", include("django_prometheus.urls"))
 ]
 
 # Serve media files
