@@ -5,11 +5,11 @@ metadata:
   namespace: k8s-campuscart
   labels:
     app: web
+    release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
       app: web
-      release: kube-prometheus-stack
   endpoints:
     - port: http
       path: /metrics
