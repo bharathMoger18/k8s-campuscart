@@ -1,0 +1,10 @@
+# =============================================================================
+# k8s-aws/namespace.yaml
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: campuscart
+  labels:
+    app.kubernetes.io/name: campuscart
+    environment: production

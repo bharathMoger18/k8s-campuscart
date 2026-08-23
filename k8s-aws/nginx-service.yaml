@@ -1,0 +1,19 @@
+# =============================================================================
+# k8s-aws/nginx-service.yaml
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: campuscart-nginx
+  namespace: campuscart
+spec:
+  type: ClusterIP # same reasoning as the backend Service — only the ALB needs to reach this, nothing external
+
+  selector:
+    app: campuscart-nginx
+
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http

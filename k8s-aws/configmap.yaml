@@ -1,0 +1,26 @@
+# =============================================================================
+# k8s-aws/configmap.yaml
+# =============================================================================
+# ConfigMaps hold NON-SENSITIVE configuration — nothing here would cause
+# harm if it leaked (unlike a password). Database host/port, feature
+# flags, log levels, allowed hosts — this is the right home for all of it.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: campuscart-config
+  namespace: campuscart
+data:
+  DJANGO_SETTINGS_MODULE: "campuscart.settings"
+  DEBUG: "False"
+  ALLOWED_HOSTS: "*"
+
+  # These three are the RDS/Redis connection details — deliberately NOT
+  # hardcoded IPs or example.com placeholders. See explanation below for
+  # why these are template variables, not real values, sitting in git.
+  DB_HOST: "${RDS_ENDPOINT}"
+  DB_PORT: "5432"
+  DB_NAME: "campuscart"
+
+  REDIS_HOST: "${REDIS_ENDPOINT}"
+  REDIS_PORT: "6379"

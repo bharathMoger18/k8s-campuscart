@@ -1,0 +1,19 @@
+# =============================================================================
+# k8s-aws/backend-service.yaml
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: campuscart-backend
+  namespace: campuscart
+spec:
+  type: ClusterIP # deliberately NOT NodePort — explained below, this is the actual replacement of your old k8s/web.yaml's NodePort approach
+
+  selector:
+    app: campuscart-backend # THIS is what connects the Service to the Deployment's pods — matches the `labels.app` on the pod template, nothing more magical than that
+
+  ports:
+    - port: 8000        # the port OTHER things inside the cluster use to reach this Service
+      targetPort: 8000   # the port the CONTAINER itself is actually listening on
+      protocol: TCP
+      name: http

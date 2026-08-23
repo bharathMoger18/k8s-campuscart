@@ -1,0 +1,20 @@
+# =============================================================================
+# terraform/bootstrap/terraform.tfvars.example
+# =============================================================================
+# HOW TO USE THIS FILE:
+# Copy it to `terraform.tfvars` (drop the .example) and fill in real values.
+# `terraform.tfvars` is the file Terraform auto-loads without needing any
+# -var-file flag. We commit the .example version to git so anyone cloning
+# this repo knows exactly what values are expected — but the REAL
+# terraform.tfvars is gitignored, because in later modules it will contain
+# things like account-specific identifiers we don't want in version history.
+# For THIS particular module there's nothing secret, but we keep the habit
+# consistent across every module so you never have to remember "wait, is
+# THIS one safe to commit?" — the answer is always no, for tfvars.
+# =============================================================================
+
+aws_region = "ap-south-1"
+
+# MUST be globally unique across all of AWS. A reliable pattern: include
+# your AWS account ID, which you can get by running: aws sts get-caller-identity
+state_bucket_name = "campuscart-tfstate-<your-account-id>"

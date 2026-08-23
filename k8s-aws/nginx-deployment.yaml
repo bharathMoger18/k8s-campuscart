@@ -1,0 +1,63 @@
+# =============================================================================
+# k8s-aws/nginx-deployment.yaml
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: campuscart-nginx
+  namespace: campuscart
+  labels:
+    app: campuscart-nginx
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: campuscart-nginx
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app: campuscart-nginx
+    spec:
+      containers:
+        - name: nginx
+          image: "${ECR_NGINX_IMAGE}:${IMAGE_TAG}"
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 80
+              name: http
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101 # nginx's own conventional non-root UID inside the official nginx image
+            allowPrivilegeEscalation: false

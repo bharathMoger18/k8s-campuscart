@@ -1,0 +1,72 @@
+# =============================================================================
+# k8s-aws/ingress.yaml
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: campuscart-ingress
+  namespace: campuscart
+  annotations:
+    # This tells the ALB Controller "you own this Ingress" — without this
+    # exact annotation, a generic ingress-nginx controller (if one were
+    # ever also installed) might try to claim it instead. ALB Controller
+    # specifically watches for this class.
+    kubernetes.io/ingress.class: alb
+
+    # internet-facing = give this ALB a real public IP/DNS name.
+    # (The alternative, "internal", creates an ALB only reachable from
+    # inside the VPC — not what we want for a public-facing storefront.)
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # ip = register POD IPs directly as ALB targets (requires the VPC CNI
+    # we discussed earlier — pods have real, routable VPC IPs, so this
+    # works). The alternative, "instance", registers NODE IPs and relies
+    # on NodePort/kube-proxy for the final hop — an extra, unnecessary
+    # network hop. "ip" mode is the more modern, more efficient choice.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # Listen on both 80 and 443 — but see the redirect rule below, plain
+    # HTTP never actually serves content, it only redirects to HTTPS.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # The ACM certificate ARN — this is a PLACEHOLDER, filled in via
+    # envsubst at deploy time once we provision the real cert in the
+    # dns-tls module (our next major piece of work).
+    alb.ingress.kubernetes.io/certificate-arn: "${ACM_CERTIFICATE_ARN}"
+
+    # Force plain HTTP requests to redirect to HTTPS — never serve real
+    # traffic unencrypted, full stop.
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+
+spec:
+  rules:
+    # - host: "${DOMAIN_NAME}" # same envsubst-templated placeholder pattern as before
+      http:
+        paths:
+          # ORDER MATTERS in some ALB Controller versions when paths
+          # overlap — more SPECIFIC paths should generally come first,
+          # though pathType: Exact/Prefix distinctions are what actually
+          # govern matching here more than literal ordering.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: campuscart-backend
+                port:
+                  number: 8000
+
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: campuscart-backend
+                port:
+                  number: 8000
+
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: campuscart-nginx
+                port:
+                  number: 80

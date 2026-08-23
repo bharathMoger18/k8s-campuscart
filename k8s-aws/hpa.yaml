@@ -1,0 +1,42 @@
+# =============================================================================
+# k8s-aws/hpa.yaml
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: campuscart-backend-hpa
+  namespace: campuscart
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: campuscart-backend # THIS must match the Deployment's metadata.name exactly
+
+  minReplicas: 2 # never scale below our baseline — matches the Deployment's own `replicas: 2`
+  maxReplicas: 6 # ceiling — deliberately bounded, so a traffic spike (or a bug causing a metrics feedback loop) can't silently scale you into a massive, unexpected AWS bill
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70 # scale up once average CPU usage across all backend pods crosses 70% of their REQUESTED cpu (250m from our Deployment) — not 70% of node capacity
+
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  behavior:
+    scaleDown:
+      # Wait 5 minutes of SUSTAINED low usage before scaling down — this
+      # prevents "flapping," where the HPA aggressively scales down the
+      # moment load briefly dips, only to immediately need to scale back
+      # up seconds later. Scaling UP has no equivalent cooldown by
+      # default — Kubernetes intentionally reacts fast to rising load,
+      # slow to shrinking load, which is the right asymmetry for user-
+      # facing traffic.
+      stabilizationWindowSeconds: 300
