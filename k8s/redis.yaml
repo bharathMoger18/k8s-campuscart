@@ -9,6 +9,8 @@ kind: Service
 metadata:
   name: redis
   namespace: k8s-campuscart
+  labels:
+    app: redis
 spec:
   # A normal (non-headless) Service is fine here — Django doesn't need to
   # address a specific Redis replica, just "the Redis service," so a single
@@ -16,8 +18,12 @@ spec:
   selector:
     app: redis
   ports:
-    - port: 6379
+    - name: redis
+      port: 6379
       targetPort: 6379
+    - name: metrics
+      port: 9121
+      targetPort: 9121
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -56,3 +62,27 @@ spec:
             limits:
               cpu: "250m"
               memory: "256Mi"
+
+        # ------------------------------------------------------------------
+        # redis_exporter sidecar — same pattern as postgres_exporter: a
+        # separate process translating Redis's native INFO command output
+        # into Prometheus format. No auth configured on this Redis, so no
+        # secrets/connection-string assembly needed — just point at
+        # localhost, same pod network namespace as the postgres_exporter
+        # setup.
+        # ------------------------------------------------------------------
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.62.0
+          ports:
+            - name: metrics
+              containerPort: 9121
+          env:
+            - name: REDIS_ADDR
+              value: "redis://localhost:6379"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
