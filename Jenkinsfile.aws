@@ -215,7 +215,7 @@ spec:
                             // ECR registry URLs follow this EXACT, predictable
                             // AWS-defined format — no API call needed to
                             // construct it once we know account ID + region.
-                            env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                            env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
                         }
                     }
                 }
@@ -543,18 +543,11 @@ spec:
     // programming languages.
     // -------------------------------------------------------------------
     post {
-        success {
-            echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
-        }
-        failure {
-            echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
-        }
-        always {
-            // Cleans up the Jenkins CONTROLLER's local workspace copy of
-            // files — NOT the actual EKS deployment. Worth being precise
-            // about this distinction: `cleanWs()` tidies up Jenkins' own
-            // disk usage, it has zero effect on what's now running in AWS.
-            cleanWs()
-        }
+    success {
+        echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
     }
+    failure {
+        echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
+    }
+}
 }
