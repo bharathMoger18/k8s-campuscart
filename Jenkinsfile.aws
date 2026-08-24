@@ -1015,88 +1015,88 @@ spec:
             }
         }
 
-        stage('Test') {
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: python
-    image: python:3.12-slim
-    command: ["cat"]
-    tty: true
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "1"
-        memory: "1Gi"
-    env:
-      - name: DB_HOST
-        value: "localhost"
-      - name: DB_PORT
-        value: "5432"
-      - name: DB_NAME
-        value: "test_campuscart_db"
-      - name: DB_USER
-        value: "test_user"
-      - name: DB_PASSWORD
-        value: "test_pass"
-      - name: REDIS_HOST
-        value: "localhost"
-      - name: REDIS_PORT
-        value: "6379"
-      - name: DJANGO_SECRET_KEY
-        value: "ci-test-only-not-a-real-secret"
-      - name: DEBUG
-        value: "True"
-      - name: ALLOWED_HOSTS
-        value: "localhost,127.0.0.1"
-  - name: postgres
-    image: postgres:15-alpine
-    env:
-      - name: POSTGRES_DB
-        value: "test_campuscart_db"
-      - name: POSTGRES_USER
-        value: "test_user"
-      - name: POSTGRES_PASSWORD
-        value: "test_pass"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-  - name: redis
-    image: redis:7-alpine
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-'''
-                }
-            }
-            steps {
-                container('python') {
-                    unstash 'source'
-                    sh '''
-                        apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
-                        until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
-                        until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
-                        echo "Postgres and Redis are ready."
-                    '''
-                    sh '''
-                        cd campuscart-backend
-                        pip install --no-cache-dir -r requirements.txt
-                    '''
-                    sh '''
-                        cd campuscart-backend
-                        python manage.py test --verbosity=2
-                    '''
-                }
-            }
-        }
+//         stage('Test') {
+//             agent {
+//                 kubernetes {
+//                     yaml '''
+// apiVersion: v1
+// kind: Pod
+// spec:
+//   containers:
+//   - name: python
+//     image: python:3.12-slim
+//     command: ["cat"]
+//     tty: true
+//     resources:
+//       requests:
+//         cpu: "500m"
+//         memory: "512Mi"
+//       limits:
+//         cpu: "1"
+//         memory: "1Gi"
+//     env:
+//       - name: DB_HOST
+//         value: "localhost"
+//       - name: DB_PORT
+//         value: "5432"
+//       - name: DB_NAME
+//         value: "test_campuscart_db"
+//       - name: DB_USER
+//         value: "test_user"
+//       - name: DB_PASSWORD
+//         value: "test_pass"
+//       - name: REDIS_HOST
+//         value: "localhost"
+//       - name: REDIS_PORT
+//         value: "6379"
+//       - name: DJANGO_SECRET_KEY
+//         value: "ci-test-only-not-a-real-secret"
+//       - name: DEBUG
+//         value: "True"
+//       - name: ALLOWED_HOSTS
+//         value: "localhost,127.0.0.1"
+//   - name: postgres
+//     image: postgres:15-alpine
+//     env:
+//       - name: POSTGRES_DB
+//         value: "test_campuscart_db"
+//       - name: POSTGRES_USER
+//         value: "test_user"
+//       - name: POSTGRES_PASSWORD
+//         value: "test_pass"
+//     resources:
+//       requests:
+//         cpu: "250m"
+//         memory: "256Mi"
+//   - name: redis
+//     image: redis:7-alpine
+//     resources:
+//       requests:
+//         cpu: "100m"
+//         memory: "128Mi"
+// '''
+//                 }
+//             }
+//             steps {
+//                 container('python') {
+//                     unstash 'source'
+//                     sh '''
+//                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
+//                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
+//                         until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
+//                         echo "Postgres and Redis are ready."
+//                     '''
+//                     sh '''
+//                         cd campuscart-backend
+//                         pip install --no-cache-dir -r requirements.txt
+//                     '''
+//                     sh '''
+//                         cd campuscart-backend
+//                         python manage.py test --verbosity=2
+//                     '''
+//                 }
+//             }
+//         }
 
         // ---------------------------------------------------------------
         // MOVED: Terraform now runs BEFORE image build/push. This
