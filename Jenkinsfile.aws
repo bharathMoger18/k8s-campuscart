@@ -1,983 +1,3 @@
-// // // // =============================================================================
-// // // // Jenkinsfile.aws
-// // // // =============================================================================
-// // // // Separate from your existing Jenkinsfile (which still deploys to your
-// // // // self-managed kubeadm cluster). This pipeline deploys the SAME
-// // // // application to AWS/EKS — different infra target, same source code.
-// // // // =============================================================================
-
-// // // pipeline {
-// // //     // ---------------------------------------------------------------------
-// // //     // `agent` tells Jenkins WHERE this pipeline's steps actually execute —
-// // //     // which machine, which environment. `agent any` means "run on
-// // //     // whichever available Jenkins agent has capacity" — the simplest
-// // //     // option. In a larger real setup, you'd often see `agent { label
-// // //     // 'docker' }` to target agents with specific tools pre-installed
-// // //     // (docker, aws-cli, kubectl, terraform). We're keeping this simple
-// // //     // for now and assuming a single capable agent.
-// // //     // ---------------------------------------------------------------------
-// // //     agent any
-
-// // //     // ---------------------------------------------------------------------
-// // //     // ENVIRONMENT VARIABLES — available to every stage below. Notice: NO
-// // //     // secrets live here directly, even though this LOOKS like the natural
-// // //     // place to put an AWS access key. Real secrets are injected via
-// // //     // Jenkins CREDENTIALS BINDING inside individual stages instead —
-// // //     // covered properly when we reach the ECR push stage.
-// // //     // ---------------------------------------------------------------------
-// // //     environment {
-// // //         AWS_REGION       = 'ap-south-1'
-// // //         ECR_REGISTRY     = "REPLACED_AT_RUNTIME" // populated dynamically once we fetch it from Terraform output, in a later stage
-// // //         CLUSTER_NAME     = 'campuscart-eks'
-// // //         IMAGE_TAG        = "${env.BUILD_NUMBER}" // Jenkins auto-provides BUILD_NUMBER — a unique, incrementing integer per pipeline run. Using this AS the image tag is a genuinely important decision, explained below.
-// // //     }
-
-// // //     stages {
-// // //         // -------------------------------------------------------------------
-// // //         // STAGE 1: Checkout
-// // //         // -------------------------------------------------------------------
-// // //         stage('Checkout') {
-// // //             steps {
-// // //                 // `checkout scm` pulls whatever revision triggered this
-// // //                 // pipeline run — the exact commit, not just "the latest
-// // //                 // main branch" — which matters because between when a
-// // //                 // webhook fires and when this stage actually runs, someone
-// // //                 // could theoretically push again. `checkout scm` guarantees
-// // //                 // you're building exactly what triggered this run, nothing
-// // //                 // newer, nothing older.
-// // //                 checkout scm
-// // //             }
-// // //         }
-// // //     }
-// // // }
-
-
-// // pipeline {
-// //     agent none
-
-// //     stages {
-
-// //         stage('Checkout') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: git
-// //     image: alpine/git:latest
-// //     command: ["cat"]
-// //     tty: true
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('git') {
-// //                     checkout scm
-// //                     script {
-// //                         sh 'git config --global --add safe.directory "$(pwd)"'
-// //                         // MATCHING your existing convention — short commit
-// //                         // SHA, not a build number. Same reasoning as your
-// //                         // original file: this identifies the CODE, not
-// //                         // just "the Nth pipeline run."
-// //                         env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-// //                     }
-// //                     stash name: 'source', includes: '**'
-// //                 }
-// //             }
-// //         }
-
-// //         // ---------------------------------------------------------------
-// //         // TEST — genuinely almost IDENTICAL to your existing stage. This
-// //         // is worth pointing out explicitly: your tests don't know or care
-// //         // whether the eventual deployment target is kubeadm or EKS. Tests
-// //         // validate YOUR APPLICATION CODE, completely independent of
-// //         // infrastructure. This is exactly why it's smart to run the SAME
-// //         // test stage regardless of deployment target — duplicating test
-// //         // logic per environment would be pure waste and a place for the
-// //         // two pipelines to silently drift out of sync.
-// //         // ---------------------------------------------------------------
-// //         stage('Test') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: python
-// //     image: python:3.12-slim
-// //     command: ["cat"]
-// //     tty: true
-// //     resources:
-// //       requests:
-// //         cpu: "500m"
-// //         memory: "512Mi"
-// //       limits:
-// //         cpu: "1"
-// //         memory: "1Gi"
-// //     env:
-// //       - name: DB_HOST
-// //         value: "localhost"
-// //       - name: DB_PORT
-// //         value: "5432"
-// //       - name: DB_NAME
-// //         value: "test_campuscart_db"
-// //       - name: DB_USER
-// //         value: "test_user"
-// //       - name: DB_PASSWORD
-// //         value: "test_pass"
-// //       - name: REDIS_HOST
-// //         value: "localhost"
-// //       - name: REDIS_PORT
-// //         value: "6379"
-// //       - name: DJANGO_SECRET_KEY
-// //         value: "ci-test-only-not-a-real-secret"
-// //       - name: DEBUG
-// //         value: "True"
-// //       - name: ALLOWED_HOSTS
-// //         value: "localhost,127.0.0.1"
-// //   - name: postgres
-// //     image: postgres:15-alpine
-// //     env:
-// //       - name: POSTGRES_DB
-// //         value: "test_campuscart_db"
-// //       - name: POSTGRES_USER
-// //         value: "test_user"
-// //       - name: POSTGRES_PASSWORD
-// //         value: "test_pass"
-// //     resources:
-// //       requests:
-// //         cpu: "250m"
-// //         memory: "256Mi"
-// //   - name: redis
-// //     image: redis:7-alpine
-// //     resources:
-// //       requests:
-// //         cpu: "100m"
-// //         memory: "128Mi"
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('python') {
-// //                     unstash 'source'
-// //                     sh '''
-// //                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
-// //                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
-// //                         until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
-// //                         echo "Postgres and Redis are ready."
-// //                     '''
-// //                     sh '''
-// //                         cd campuscart-backend
-// //                         pip install --no-cache-dir -r requirements.txt
-// //                     '''
-// //                     sh '''
-// //                         cd campuscart-backend
-// //                         python manage.py test --verbosity=2
-// //                     '''
-// //                 }
-// //             }
-// //         }
-// //                 stage('Prepare AWS Context') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: aws-cli
-// //     image: amazon/aws-cli:2.17.0
-// //     command: ["cat"]
-// //     tty: true
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('aws-cli') {
-// //                     // withCredentials injects the IAM user's access key
-// //                     // ONLY for the duration of this block, as environment
-// //                     // variables — never written to disk, never logged.
-// //                     // Jenkins also automatically MASKS these values in the
-// //                     // build console output, replacing them with ****, even
-// //                     // if a script accidentally tried to echo them.
-// //                     withCredentials([[
-// //                         $class: 'AmazonWebServicesCredentialsBinding',
-// //                         credentialsId: 'aws-campuscart-ci' // the ID you'll set when creating this credential in Jenkins
-// //                     ]]) {
-// //                         script {
-// //                             env.AWS_ACCOUNT_ID = sh(
-// //                                 script: "aws sts get-caller-identity --query Account --output text",
-// //                                 returnStdout: true
-// //                             ).trim()
-// //                             // ECR registry URLs follow this EXACT, predictable
-// //                             // AWS-defined format — no API call needed to
-// //                             // construct it once we know account ID + region.
-// //                             env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-// //                         }
-// //                     }
-// //                 }
-// //             }
-// //         }
-// //                 stage('Build and Push Images') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: kaniko-web
-// //     image: gcr.io/kaniko-project/executor:debug
-// //     command: ["cat"]
-// //     tty: true
-// //     resources:
-// //       requests:
-// //         cpu: "500m"
-// //         memory: "1Gi"
-// //       limits:
-// //         cpu: "2"
-// //         memory: "2Gi"
-// //   - name: kaniko-nginx
-// //     image: gcr.io/kaniko-project/executor:debug
-// //     command: ["cat"]
-// //     tty: true
-// //     resources:
-// //       requests:
-// //         cpu: "250m"
-// //         memory: "512Mi"
-// //       limits:
-// //         cpu: "1"
-// //         memory: "1Gi"
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 withCredentials([[
-// //                     $class: 'AmazonWebServicesCredentialsBinding',
-// //                     credentialsId: 'aws-campuscart-ci'
-// //                 ]]) {
-// //                     container('kaniko-web') {
-// //                         unstash 'source'
-// //                         // NOTICE: no --insecure, no --insecure-pull, and only
-// //                         // ONE --destination (no :latest — IMMUTABLE tags
-// //                         // forbid it). Kaniko has BUILT-IN native support for
-// //                         // ECR: it detects a *.dkr.ecr.*.amazonaws.com
-// //                         // destination automatically and authenticates using
-// //                         // the standard AWS credential chain — the exact same
-// //                         // AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
-// //                         // AWS_SESSION_TOKEN env vars withCredentials just
-// //                         // injected. No separate "docker login" equivalent
-// //                         // step needed at all.
-// //                         sh '''
-// //                             /kaniko/executor \
-// //                               --context=dir://$(pwd)/campuscart-backend \
-// //                               --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-// //                               --destination=${ECR_REGISTRY}/campuscart-backend:${IMAGE_TAG} \
-// //                               --cache=true
-// //                         '''
-// //                     }
-
-// //                     container('kaniko-nginx') {
-// //                         unstash 'source'
-// //                         sh '''
-// //                             /kaniko/executor \
-// //                               --context=dir://$(pwd) \
-// //                               --dockerfile=$(pwd)/nginx/Dockerfile \
-// //                               --destination=${ECR_REGISTRY}/campuscart-nginx:${IMAGE_TAG} \
-// //                               --cache=true
-// //                         '''
-// //                     }
-// //                 }
-// //             }
-// //         }
-// //                 stage('Terraform Plan') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: terraform
-// //     image: hashicorp/terraform:1.10.5
-// //     command: ["cat"]
-// //     tty: true
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('terraform') {
-// //                     unstash 'source'
-// //                     withCredentials([[
-// //                         $class: 'AmazonWebServicesCredentialsBinding',
-// //                         credentialsId: 'aws-campuscart-ci'
-// //                     ]]) {
-// //                         dir('terraform/environments/production') {
-// //                             sh 'terraform init -input=false'
-
-// //                             // -out saves the EXACT computed plan to a binary
-// //                             // file. This matters more than it looks: without
-// //                             // it, "terraform apply" run LATER would
-// //                             // RECALCULATE its own plan at apply-time — and if
-// //                             // even one second has passed and something in AWS
-// //                             // changed in between (another engineer applied
-// //                             // something, an AWS-side change happened), the
-// //                             // plan a human just reviewed and approved would
-// //                             // NOT be the plan that actually gets applied. This
-// //                             // is a genuine TOCTOU (time-of-check to
-// //                             // time-of-use) risk — saving the plan file closes
-// //                             // that gap completely: what gets approved is
-// //                             // GUARANTEED to be exactly what gets applied.
-// //                             sh 'terraform plan -input=false -out=tfplan'
-
-// //                             // Print a clean, human-readable rendering of the
-// //                             // SAVED plan file into the build log, so whoever
-// //                             // approves next can actually read it without
-// //                             // needing terminal access themselves.
-// //                             sh 'terraform show -no-color tfplan > tfplan.txt'
-// //                         }
-// //                     }
-// //                     // Stash the binary plan file (and its text rendering) so
-// //                     // the LATER apply stage — a different pod entirely — can
-// //                     // retrieve and apply this EXACT plan, not recompute a new
-// //                     // one.
-// //                     stash name: 'tfplan', includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
-// //                 }
-// //             }
-// //         }
-
-// //         stage('Approve Infrastructure Changes') {
-// //             // Deliberately NO 'agent' here — this stage doesn't run any
-// //             // shell commands at all, it just PAUSES the pipeline and waits.
-// //             // Allocating a whole Kubernetes pod just to sit idle waiting for
-// //             // a human click would be pure resource waste.
-// //             agent none
-// //             steps {
-// //                 script {
-// //                     // Print the plan directly into THIS stage's log too, so
-// //                     // whoever's approving doesn't have to go dig through the
-// //                     // previous stage's log to find it.
-// //                     unstash 'tfplan'
-// //                     sh 'cat terraform/environments/production/tfplan.txt'
-// //                 }
-// //                 // `input` PAUSES pipeline execution entirely, waiting for a
-// //                 // human to click Proceed or Abort in the Jenkins UI.
-// //                 timeout(time: 30, unit: 'MINUTES') {
-// //                     input(
-// //                         message: 'Review the Terraform plan above. Apply these infrastructure changes?',
-// //                         // Restricts WHO is allowed to click approve — without
-// //                         // this, ANY Jenkins user with pipeline access could
-// //                         // approve infra changes, which defeats the entire
-// //                         // purpose of a human review gate.
-// //                         submitter: 'Bharath'
-// //                     )
-// //                 }
-// //             }
-// //         }
-
-// //         stage('Terraform Apply') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: terraform
-// //     image: hashicorp/terraform:1.10.5
-// //     command: ["cat"]
-// //     tty: true
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('terraform') {
-// //                     unstash 'tfplan'
-// //                     withCredentials([[
-// //                         $class: 'AmazonWebServicesCredentialsBinding',
-// //                         credentialsId: 'aws-campuscart-ci'
-// //                     ]]) {
-// //                         dir('terraform/environments/production') {
-// //                             sh 'terraform init -input=false'
-// //                             // Applying the SAVED FILE, not re-running plan.
-// //                             // This is the payoff of everything explained
-// //                             // above — guaranteed, exact reproduction of what
-// //                             // was reviewed and approved.
-// //                             sh 'terraform apply -input=false tfplan'
-// //                         }
-// //                     }
-// //                 }
-// //             }
-// //         }
-// //                 stage('Render Manifests') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: terraform
-// //     image: hashicorp/terraform:1.10.5
-// //     command: ["cat"]
-// //     tty: true
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('terraform') {
-// //                     unstash 'source'
-// //                     withCredentials([[
-// //                         $class: 'AmazonWebServicesCredentialsBinding',
-// //                         credentialsId: 'aws-campuscart-ci'
-// //                     ]]) {
-// //                         dir('terraform/environments/production') {
-// //                             sh 'terraform init -input=false'
-// //                             script {
-// //                                 // Pulling REAL, freshly-applied values straight
-// //                                 // out of Terraform state — never hand-typed,
-// //                                 // never stale. This is the actual bridge
-// //                                 // between "infrastructure as code" and "app
-// //                                 // deployment" — Terraform's own outputs become
-// //                                 // this pipeline's environment variables.
-// //                                 env.RDS_ENDPOINT       = sh(script: 'terraform output -raw db_endpoint', returnStdout: true).trim()
-// //                                 env.REDIS_ENDPOINT     = sh(script: 'terraform output -raw redis_endpoint', returnStdout: true).trim()
-// //                                 env.ECR_BACKEND_IMAGE  = sh(script: 'terraform output -json ecr_repository_urls | jq -r .[\\"campuscart-backend\\"]', returnStdout: true).trim()
-// //                                 env.ECR_NGINX_IMAGE    = sh(script: 'terraform output -json ecr_repository_urls | jq -r .[\\"campuscart-nginx\\"]', returnStdout: true).trim()
-// //                             }
-// //                         }
-// //                     }
-// //                     // envsubst is only given an EXPLICIT list of variable
-// //                     // names to replace — NOT every ${...} pattern blindly.
-// //                     // Why this matters: some of our YAML/config could
-// //                     // theoretically contain a literal $ character that was
-// //                     // never meant to be substituted (rare, but a real
-// //                     // footgun) — an explicit allowlist prevents accidental
-// //                     // substitution of anything we didn't intend.
-// //                     sh '''
-// //                         mkdir -p rendered
-// //                         for f in k8s-aws/*.yaml; do
-// //                           envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
-// //                             < "$f" > "rendered/$(basename "$f")"
-// //                         done
-// //                     '''
-// //                     stash name: 'rendered-manifests', includes: 'rendered/**'
-// //                 }
-// //             }
-// //         }
-
-// //         stage('Deploy to EKS') {
-// //             agent {
-// //                 kubernetes {
-// //                     yaml '''
-// // apiVersion: v1
-// // kind: Pod
-// // spec:
-// //   containers:
-// //   - name: kubectl
-// //     image: amazon/aws-cli:2.17.0
-// //     command: ["cat"]
-// //     tty: true
-// // '''
-// //                 }
-// //             }
-// //             steps {
-// //                 container('kubectl') {
-// //                     unstash 'rendered-manifests'
-// //                     withCredentials([[
-// //                         $class: 'AmazonWebServicesCredentialsBinding',
-// //                         credentialsId: 'aws-campuscart-ci'
-// //                     ]]) {
-// //                         sh '''
-// //                             # This is what actually consumes the aws_eks_access_entry
-// //                             # we just built — update-kubeconfig configures kubectl
-// //                             # to use our AWS credentials to authenticate, and the
-// //                             # access entry is what makes AWS accept that identity
-// //                             # for KUBERNETES-level operations, not just AWS APIs.
-// //                             aws eks update-kubeconfig --name campuscart-eks --region ${AWS_REGION}
-// //                         '''
-
-// //                         // ORDER MATTERS here, and it's not arbitrary — the
-// //                         // namespace must exist before anything can be
-// //                         // deployed INTO it; the ConfigMap/Secret should exist
-// //                         // before Deployments that reference them start, or
-// //                         // pods would crash-loop on missing env vars at
-// //                         // startup. kubectl apply doesn't guarantee any
-// //                         // ordering across multiple files on its own — WE
-// //                         // enforce it explicitly here.
-// //                         sh '''
-// //                             kubectl apply -f rendered/namespace.yaml
-// //                             kubectl apply -f rendered/configmap.yaml
-// //                             kubectl apply -f rendered/serviceaccount.yaml
-// //                             kubectl apply -f rendered/secretstore.yaml
-// //                             kubectl apply -f rendered/externalsecret.yaml
-// //                             kubectl apply -f rendered/backend-deployment.yaml
-// //                             kubectl apply -f rendered/backend-service.yaml
-// //                             kubectl apply -f rendered/nginx-deployment.yaml
-// //                             kubectl apply -f rendered/nginx-service.yaml
-// //                             kubectl apply -f rendered/ingress.yaml
-// //                             kubectl apply -f rendered/hpa.yaml
-// //                         '''
-
-// //                         // BLOCKS until the new pods are actually Ready, same
-// //                         // principle as your existing pipeline's rollout
-// //                         // status check — turns "I told Kubernetes to update"
-// //                         // into a genuine pass/fail signal the pipeline can
-// //                         // act on, not fire-and-forget.
-// //                         sh '''
-// //                             kubectl rollout status deployment/campuscart-backend -n campuscart --timeout=180s
-// //                             kubectl rollout status deployment/campuscart-nginx -n campuscart --timeout=120s
-// //                         '''
-// //                     }
-// //                 }
-// //             }
-// //         }
-// //     }
-
-// //     // -------------------------------------------------------------------
-// //     // post{} runs REGARDLESS of which stage succeeded or failed — the
-// //     // pipeline's "finally" block, same concept as try/finally in most
-// //     // programming languages.
-// //     // -------------------------------------------------------------------
-// //     post {
-// //     success {
-// //         echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
-// //     }
-// //     failure {
-// //         echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
-// //     }
-// // }
-// // }
-
-
-
-// // =============================================================================
-// // Jenkinsfile.aws
-// // =============================================================================
-// // Separate from Jenkinsfile (which deploys to the self-managed kubeadm
-// // cluster). This pipeline deploys the SAME application to AWS — building
-// // images, pushing to ECR, provisioning/updating infra via Terraform, and
-// // deploying to EKS.
-// // =============================================================================
-
-// pipeline {
-//     // agent none: every stage below provisions its OWN ephemeral Kubernetes
-//     // pod, tailored to that stage's specific tools. Nothing persists between
-//     // stages except what's explicitly stash/unstash'd.
-//     agent none
-
-//     environment {
-//         AWS_REGION   = 'ap-south-1'
-//         CLUSTER_NAME = 'campuscart-eks'
-//         // ECR_REGISTRY and IMAGE_TAG are NOT declared here — both are
-//         // computed at runtime, in later stages, and assigned via env.X.
-//         // Declaring them here with a placeholder was the source of last
-//         // build's bug: this block only runs ONCE at pipeline start, before
-//         // later stages compute the real values.
-//     }
-
-//     stages {
-
-//         stage('Checkout') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: git
-//     image: alpine/git:latest
-//     command: ["cat"]
-//     tty: true
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('git') {
-//                     checkout scm
-//                     script {
-//                         sh 'git config --global --add safe.directory "$(pwd)"'
-//                         // Git commit SHA, not a build number — identifies
-//                         // the exact code, matches the convention already
-//                         // used in the self-managed Jenkinsfile.
-//                         env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-//                     }
-//                     stash name: 'source', includes: '**'
-//                 }
-//             }
-//         }
-
-//         stage('Test') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: python
-//     image: python:3.12-slim
-//     command: ["cat"]
-//     tty: true
-//     resources:
-//       requests:
-//         cpu: "500m"
-//         memory: "512Mi"
-//       limits:
-//         cpu: "1"
-//         memory: "1Gi"
-//     env:
-//       - name: DB_HOST
-//         value: "localhost"
-//       - name: DB_PORT
-//         value: "5432"
-//       - name: DB_NAME
-//         value: "test_campuscart_db"
-//       - name: DB_USER
-//         value: "test_user"
-//       - name: DB_PASSWORD
-//         value: "test_pass"
-//       - name: REDIS_HOST
-//         value: "localhost"
-//       - name: REDIS_PORT
-//         value: "6379"
-//       - name: DJANGO_SECRET_KEY
-//         value: "ci-test-only-not-a-real-secret"
-//       - name: DEBUG
-//         value: "True"
-//       - name: ALLOWED_HOSTS
-//         value: "localhost,127.0.0.1"
-//   - name: postgres
-//     image: postgres:15-alpine
-//     env:
-//       - name: POSTGRES_DB
-//         value: "test_campuscart_db"
-//       - name: POSTGRES_USER
-//         value: "test_user"
-//       - name: POSTGRES_PASSWORD
-//         value: "test_pass"
-//     resources:
-//       requests:
-//         cpu: "250m"
-//         memory: "256Mi"
-//   - name: redis
-//     image: redis:7-alpine
-//     resources:
-//       requests:
-//         cpu: "100m"
-//         memory: "128Mi"
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('python') {
-//                     unstash 'source'
-//                     sh '''
-//                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
-//                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
-//                         until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
-//                         echo "Postgres and Redis are ready."
-//                     '''
-//                     sh '''
-//                         cd campuscart-backend
-//                         pip install --no-cache-dir -r requirements.txt
-//                     '''
-//                     sh '''
-//                         cd campuscart-backend
-//                         python manage.py test --verbosity=2
-//                     '''
-//                 }
-//             }
-//         }
-
-//         stage('Prepare AWS Context') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: aws-cli
-//     image: amazon/aws-cli:2.17.0
-//     command: ["cat"]
-//     tty: true
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('aws-cli') {
-//                     withCredentials([[
-//                         $class: 'AmazonWebServicesCredentialsBinding',
-//                         credentialsId: 'aws-campuscart-ci'
-//                     ]]) {
-//                         script {
-//                             env.AWS_ACCOUNT_ID = sh(
-//                                 script: "aws sts get-caller-identity --query Account --output text",
-//                                 returnStdout: true
-//                             ).trim()
-//                             // BOTH sides now correctly use env. — this was
-//                             // last build's exact bug, fixed here.
-//                             env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-
-//         stage('Build and Push Images') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: kaniko-web
-//     image: gcr.io/kaniko-project/executor:debug
-//     command: ["cat"]
-//     tty: true
-//     resources:
-//       requests:
-//         cpu: "500m"
-//         memory: "1Gi"
-//       limits:
-//         cpu: "2"
-//         memory: "2Gi"
-//   - name: kaniko-nginx
-//     image: gcr.io/kaniko-project/executor:debug
-//     command: ["cat"]
-//     tty: true
-//     resources:
-//       requests:
-//         cpu: "250m"
-//         memory: "512Mi"
-//       limits:
-//         cpu: "1"
-//         memory: "1Gi"
-// '''
-//                 }
-//             }
-//             steps {
-//                 withCredentials([[
-//                     $class: 'AmazonWebServicesCredentialsBinding',
-//                     credentialsId: 'aws-campuscart-ci'
-//                 ]]) {
-//                     container('kaniko-web') {
-//                         unstash 'source'
-//                         sh '''
-//                             /kaniko/executor \
-//                               --context=dir://$(pwd)/campuscart-backend \
-//                               --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-//                               --destination=${ECR_REGISTRY}/campuscart-backend:${IMAGE_TAG} \
-//                               --cache=true
-//                         '''
-//                     }
-//                     container('kaniko-nginx') {
-//                         unstash 'source'
-//                         sh '''
-//                             /kaniko/executor \
-//                               --context=dir://$(pwd) \
-//                               --dockerfile=$(pwd)/nginx/Dockerfile \
-//                               --destination=${ECR_REGISTRY}/campuscart-nginx:${IMAGE_TAG} \
-//                               --cache=true
-//                         '''
-//                     }
-//                 }
-//             }
-//         }
-
-//         stage('Terraform Plan') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: terraform
-//     image: hashicorp/terraform:1.10.5
-//     command: ["cat"]
-//     tty: true
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('terraform') {
-//                     unstash 'source'
-//                     withCredentials([[
-//                         $class: 'AmazonWebServicesCredentialsBinding',
-//                         credentialsId: 'aws-campuscart-ci'
-//                     ]]) {
-//                         dir('terraform/environments/production') {
-//                             sh 'terraform init -input=false'
-//                             sh 'terraform plan -input=false -out=tfplan'
-//                             sh 'terraform show -no-color tfplan > tfplan.txt'
-//                         }
-//                     }
-//                     stash name: 'tfplan', includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
-//                 }
-//             }
-//         }
-
-//         stage('Approve Infrastructure Changes') {
-//             agent none
-//             steps {
-//                 script {
-//                     unstash 'tfplan'
-//                     sh 'cat terraform/environments/production/tfplan.txt'
-//                 }
-//                 timeout(time: 30, unit: 'MINUTES') {
-//                     input(
-//                         message: 'Review the Terraform plan above. Apply these infrastructure changes?',
-//                         // TODO: confirm this exactly matches your Jenkins login username
-//                         submitter: 'Bharath'
-//                     )
-//                 }
-//             }
-//         }
-
-//         stage('Terraform Apply') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: terraform
-//     image: hashicorp/terraform:1.10.5
-//     command: ["cat"]
-//     tty: true
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('terraform') {
-//                     unstash 'tfplan'
-//                     withCredentials([[
-//                         $class: 'AmazonWebServicesCredentialsBinding',
-//                         credentialsId: 'aws-campuscart-ci'
-//                     ]]) {
-//                         dir('terraform/environments/production') {
-//                             sh 'terraform init -input=false'
-//                             sh 'terraform apply -input=false tfplan'
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-
-//         stage('Render Manifests') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: terraform
-//     image: hashicorp/terraform:1.10.5
-//     command: ["cat"]
-//     tty: true
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('terraform') {
-//                     unstash 'source'
-//                     withCredentials([[
-//                         $class: 'AmazonWebServicesCredentialsBinding',
-//                         credentialsId: 'aws-campuscart-ci'
-//                     ]]) {
-//                         dir('terraform/environments/production') {
-//                             sh 'terraform init -input=false'
-//                             script {
-//                                 env.RDS_ENDPOINT      = sh(script: 'terraform output -raw db_endpoint', returnStdout: true).trim()
-//                                 env.REDIS_ENDPOINT    = sh(script: 'terraform output -raw redis_endpoint', returnStdout: true).trim()
-//                                 env.ECR_BACKEND_IMAGE = sh(script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-backend\"'", returnStdout: true).trim()
-//                                 env.ECR_NGINX_IMAGE   = sh(script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-nginx\"'", returnStdout: true).trim()
-//                             }
-//                         }
-//                     }
-//                     sh '''
-//                         mkdir -p rendered
-//                         for f in k8s-aws/*.yaml; do
-//                           envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
-//                             < "$f" > "rendered/$(basename "$f")"
-//                         done
-//                     '''
-//                     stash name: 'rendered-manifests', includes: 'rendered/**'
-//                 }
-//             }
-//         }
-
-//         stage('Deploy to EKS') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: kubectl
-//     image: amazon/aws-cli:2.17.0
-//     command: ["cat"]
-//     tty: true
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('kubectl') {
-//                     unstash 'rendered-manifests'
-//                     withCredentials([[
-//                         $class: 'AmazonWebServicesCredentialsBinding',
-//                         credentialsId: 'aws-campuscart-ci'
-//                     ]]) {
-//                         sh '''
-//                             aws eks update-kubeconfig --name campuscart-eks --region ${AWS_REGION}
-//                         '''
-//                         sh '''
-//                             kubectl apply -f rendered/namespace.yaml
-//                             kubectl apply -f rendered/configmap.yaml
-//                             kubectl apply -f rendered/serviceaccount.yaml
-//                             kubectl apply -f rendered/secretstore.yaml
-//                             kubectl apply -f rendered/externalsecret.yaml
-//                             kubectl apply -f rendered/backend-deployment.yaml
-//                             kubectl apply -f rendered/backend-service.yaml
-//                             kubectl apply -f rendered/nginx-deployment.yaml
-//                             kubectl apply -f rendered/nginx-service.yaml
-//                             kubectl apply -f rendered/ingress.yaml
-//                             kubectl apply -f rendered/hpa.yaml
-//                         '''
-//                         sh '''
-//                             kubectl rollout status deployment/campuscart-backend -n campuscart --timeout=180s
-//                             kubectl rollout status deployment/campuscart-nginx -n campuscart --timeout=120s
-//                         '''
-//                     }
-//                 }
-//             }
-//         }
-//     }
-
-//     post {
-//         success {
-//             echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
-//         }
-//         failure {
-//             echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
-//         }
-//     }
-// }
-
-
-// =============================================================================
-// Jenkinsfile.aws
-// =============================================================================
 pipeline {
     agent none
 
@@ -996,113 +16,30 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: git
-    image: alpine/git:latest
-    command: ["cat"]
-    tty: true
+    - name: git
+      image: alpine/git:latest
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
             steps {
                 container('git') {
                     checkout scm
+
                     script {
                         sh 'git config --global --add safe.directory "$(pwd)"'
-                        env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        env.IMAGE_TAG = sh(
+                            script: 'git rev-parse --short HEAD',
+                            returnStdout: true
+                        ).trim()
                     }
+
                     stash name: 'source', includes: '**'
                 }
             }
         }
 
-//         stage('Test') {
-//             agent {
-//                 kubernetes {
-//                     yaml '''
-// apiVersion: v1
-// kind: Pod
-// spec:
-//   containers:
-//   - name: python
-//     image: python:3.12-slim
-//     command: ["cat"]
-//     tty: true
-//     resources:
-//       requests:
-//         cpu: "500m"
-//         memory: "512Mi"
-//       limits:
-//         cpu: "1"
-//         memory: "1Gi"
-//     env:
-//       - name: DB_HOST
-//         value: "localhost"
-//       - name: DB_PORT
-//         value: "5432"
-//       - name: DB_NAME
-//         value: "test_campuscart_db"
-//       - name: DB_USER
-//         value: "test_user"
-//       - name: DB_PASSWORD
-//         value: "test_pass"
-//       - name: REDIS_HOST
-//         value: "localhost"
-//       - name: REDIS_PORT
-//         value: "6379"
-//       - name: DJANGO_SECRET_KEY
-//         value: "ci-test-only-not-a-real-secret"
-//       - name: DEBUG
-//         value: "True"
-//       - name: ALLOWED_HOSTS
-//         value: "localhost,127.0.0.1"
-//   - name: postgres
-//     image: postgres:15-alpine
-//     env:
-//       - name: POSTGRES_DB
-//         value: "test_campuscart_db"
-//       - name: POSTGRES_USER
-//         value: "test_user"
-//       - name: POSTGRES_PASSWORD
-//         value: "test_pass"
-//     resources:
-//       requests:
-//         cpu: "250m"
-//         memory: "256Mi"
-//   - name: redis
-//     image: redis:7-alpine
-//     resources:
-//       requests:
-//         cpu: "100m"
-//         memory: "128Mi"
-// '''
-//                 }
-//             }
-//             steps {
-//                 container('python') {
-//                     unstash 'source'
-//                     sh '''
-//                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
-//                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
-//                         until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
-//                         echo "Postgres and Redis are ready."
-//                     '''
-//                     sh '''
-//                         cd campuscart-backend
-//                         pip install --no-cache-dir -r requirements.txt
-//                     '''
-//                     sh '''
-//                         cd campuscart-backend
-//                         python manage.py test --verbosity=2
-//                     '''
-//                 }
-//             }
-//         }
-
-        // ---------------------------------------------------------------
-        // MOVED: Terraform now runs BEFORE image build/push. This
-        // guarantees ECR repositories (and everything else images/deploy
-        // depend on) actually exist before anything tries to use them.
-        // ---------------------------------------------------------------
         stage('Terraform Plan') {
             agent {
                 kubernetes {
@@ -1111,16 +48,17 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: terraform
-    image: hashicorp/terraform:1.10.5
-    command: ["cat"]
-    tty: true
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
             steps {
                 container('terraform') {
                     unstash 'source'
+
                     withCredentials([[
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
@@ -1131,41 +69,39 @@ spec:
                             sh 'terraform show -no-color tfplan > tfplan.txt'
                         }
                     }
-                    stash name: 'tfplan', includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
+
+                    stash name: 'tfplan',
+                          includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
                 }
             }
         }
 
         stage('Show Terraform Plan') {
-                agent {
-                    kubernetes {
-                        yaml '''
-            apiVersion: v1
-            kind: Pod
-            spec:
-            containers:
-            - name: git
-                image: alpine/git:latest
-                command: ["cat"]
-                tty: true
-            '''
-                    }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: git
+      image: alpine/git:latest
+      command: ["cat"]
+      tty: true
+'''
                 }
-                steps {
-                    container('git') {
-                        unstash 'tfplan'
-                        sh 'cat terraform/environments/production/tfplan.txt'
-                    }
+            }
+            steps {
+                container('git') {
+                    unstash 'tfplan'
+                    sh 'cat terraform/environments/production/tfplan.txt'
                 }
+            }
         }
 
         stage('Approve Infrastructure Changes') {
-            // Genuinely agent-less now — `input` alone doesn't touch the
-            // filesystem or run any shell command, so it's the ONLY step that
-            // correctly belongs in an agent-none stage. This also means we're
-            // not holding a Kubernetes pod idle for up to 30 minutes just
-            // waiting on a human click — a real resource-efficiency win.
             agent none
+
             steps {
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
@@ -1184,16 +120,17 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: terraform
-    image: hashicorp/terraform:1.10.5
-    command: ["cat"]
-    tty: true
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
             steps {
                 container('terraform') {
                     unstash 'tfplan'
+
                     withCredentials([[
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
@@ -1215,10 +152,10 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: aws-cli
-    image: amazon/aws-cli:2.17.0
-    command: ["cat"]
-    tty: true
+    - name: aws-cli
+      image: amazon/aws-cli:2.17.0
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
@@ -1230,9 +167,10 @@ spec:
                     ]]) {
                         script {
                             env.AWS_ACCOUNT_ID = sh(
-                                script: "aws sts get-caller-identity --query Account --output text",
+                                script: 'aws sts get-caller-identity --query Account --output text',
                                 returnStdout: true
                             ).trim()
+
                             env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
                         }
                     }
@@ -1248,28 +186,29 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: kaniko-web
-    image: gcr.io/kaniko-project/executor:debug
-    command: ["cat"]
-    tty: true
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "1Gi"
-      limits:
-        cpu: "2"
-        memory: "2Gi"
-  - name: kaniko-nginx
-    image: gcr.io/kaniko-project/executor:debug
-    command: ["cat"]
-    tty: true
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "512Mi"
-      limits:
-        cpu: "1"
-        memory: "1Gi"
+    - name: kaniko-web
+      image: gcr.io/kaniko-project/executor:debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+
+    - name: kaniko-nginx
+      image: gcr.io/kaniko-project/executor:debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
 '''
                 }
             }
@@ -1280,6 +219,7 @@ spec:
                 ]]) {
                     container('kaniko-web') {
                         unstash 'source'
+
                         sh '''
                             /kaniko/executor \
                               --context=dir://$(pwd)/campuscart-backend \
@@ -1288,8 +228,10 @@ spec:
                               --cache=true
                         '''
                     }
+
                     container('kaniko-nginx') {
                         unstash 'source'
+
                         sh '''
                             /kaniko/executor \
                               --context=dir://$(pwd) \
@@ -1310,37 +252,57 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: terraform
-    image: hashicorp/terraform:1.10.5
-    command: ["cat"]
-    tty: true
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
             steps {
                 container('terraform') {
                     unstash 'source'
+
                     withCredentials([[
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         dir('terraform/environments/production') {
                             sh 'terraform init -input=false'
+
                             script {
-                                env.RDS_ENDPOINT      = sh(script: 'terraform output -raw db_endpoint', returnStdout: true).trim()
-                                env.REDIS_ENDPOINT    = sh(script: 'terraform output -raw redis_endpoint', returnStdout: true).trim()
-                                env.ECR_BACKEND_IMAGE = sh(script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-backend\"'", returnStdout: true).trim()
-                                env.ECR_NGINX_IMAGE   = sh(script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-nginx\"'", returnStdout: true).trim()
+                                env.RDS_ENDPOINT = sh(
+                                    script: 'terraform output -raw db_endpoint',
+                                    returnStdout: true
+                                ).trim()
+
+                                env.REDIS_ENDPOINT = sh(
+                                    script: 'terraform output -raw redis_endpoint',
+                                    returnStdout: true
+                                ).trim()
+
+                                env.ECR_BACKEND_IMAGE = sh(
+                                    script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-backend\"'",
+                                    returnStdout: true
+                                ).trim()
+
+                                env.ECR_NGINX_IMAGE = sh(
+                                    script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-nginx\"'",
+                                    returnStdout: true
+                                ).trim()
                             }
                         }
                     }
+
                     sh '''
                         mkdir -p rendered
+
                         for f in k8s-aws/*.yaml; do
-                          envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
-                            < "$f" > "rendered/$(basename "$f")"
+                            envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
+                                < "$f" > "rendered/$(basename "$f")"
                         done
                     '''
+
                     stash name: 'rendered-manifests', includes: 'rendered/**'
                 }
             }
@@ -1354,23 +316,27 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  - name: kubectl
-    image: amazon/aws-cli:2.17.0
-    command: ["cat"]
-    tty: true
+    - name: kubectl
+      image: amazon/aws-cli:2.17.0
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
             steps {
                 container('kubectl') {
                     unstash 'rendered-manifests'
+
                     withCredentials([[
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         sh '''
-                            aws eks update-kubeconfig --name campuscart-eks --region ${AWS_REGION}
+                            aws eks update-kubeconfig \
+                                --name ${CLUSTER_NAME} \
+                                --region ${AWS_REGION}
                         '''
+
                         sh '''
                             kubectl apply -f rendered/namespace.yaml
                             kubectl apply -f rendered/configmap.yaml
@@ -1384,9 +350,15 @@ spec:
                             kubectl apply -f rendered/ingress.yaml
                             kubectl apply -f rendered/hpa.yaml
                         '''
+
                         sh '''
-                            kubectl rollout status deployment/campuscart-backend -n campuscart --timeout=180s
-                            kubectl rollout status deployment/campuscart-nginx -n campuscart --timeout=120s
+                            kubectl rollout status deployment/campuscart-backend \
+                                -n campuscart \
+                                --timeout=180s
+
+                            kubectl rollout status deployment/campuscart-nginx \
+                                -n campuscart \
+                                --timeout=120s
                         '''
                     }
                 }
@@ -1398,6 +370,7 @@ spec:
         success {
             echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
         }
+
         failure {
             echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
         }
