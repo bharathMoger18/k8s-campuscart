@@ -23,12 +23,14 @@ spec:
 '''
                 }
             }
+
             steps {
                 container('git') {
                     checkout scm
 
                     script {
                         sh 'git config --global --add safe.directory "$(pwd)"'
+
                         env.IMAGE_TAG = sh(
                             script: 'git rev-parse --short HEAD',
                             returnStdout: true
@@ -55,6 +57,7 @@ spec:
 '''
                 }
             }
+
             steps {
                 container('terraform') {
                     unstash 'source'
@@ -64,9 +67,15 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
-                            sh 'terraform plan -input=false -out=tfplan'
-                            sh 'terraform show -no-color tfplan > tfplan.txt'
+                            sh '''
+                                terraform init -input=false
+                                terraform plan \
+                                    -input=false \
+                                    -out=tfplan
+                                terraform show \
+                                    -no-color \
+                                    tfplan > tfplan.txt
+                            '''
                         }
                     }
 
@@ -91,22 +100,20 @@ spec:
 '''
                 }
             }
+
             steps {
                 container('git') {
                     unstash 'tfplan'
-                    sh 'cat terraform/environments/production/tfplan.txt'
-                }
-            }
-        }
 
-        stage('Approve Infrastructure Changes') {
-            agent none
+                    sh '''
+                        echo "=============================================="
+                        echo "           TERRAFORM PLAN"
+                        echo "=============================================="
 
-            steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    input(
-                        message: 'Review the Terraform plan above. Apply these infrastructure changes?',
-                    )
+                        cat terraform/environments/production/tfplan.txt
+
+                        echo "=============================================="
+                    '''
                 }
             }
         }
@@ -126,6 +133,7 @@ spec:
 '''
                 }
             }
+
             steps {
                 container('terraform') {
                     unstash 'tfplan'
@@ -135,8 +143,12 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
-                            sh 'terraform apply -input=false tfplan'
+                            sh '''
+                                terraform init -input=false
+                                terraform apply \
+                                    -input=false \
+                                    tfplan
+                            '''
                         }
                     }
                 }
@@ -158,6 +170,7 @@ spec:
 '''
                 }
             }
+
             steps {
                 container('aws-cli') {
                     withCredentials([[
@@ -166,11 +179,21 @@ spec:
                     ]]) {
                         script {
                             env.AWS_ACCOUNT_ID = sh(
-                                script: 'aws sts get-caller-identity --query Account --output text',
+                                script: '''
+                                    aws sts get-caller-identity \
+                                        --query Account \
+                                        --output text
+                                ''',
                                 returnStdout: true
                             ).trim()
 
-                            env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+                            env.ECR_REGISTRY =
+                                "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+                            echo "AWS Account : ${env.AWS_ACCOUNT_ID}"
+                            echo "AWS Region  : ${env.AWS_REGION}"
+                            echo "ECR Registry: ${env.ECR_REGISTRY}"
+                            echo "Image Tag   : ${env.IMAGE_TAG}"
                         }
                     }
                 }
@@ -211,20 +234,26 @@ spec:
 '''
                 }
             }
+
             steps {
                 withCredentials([[
                     $class: 'AmazonWebServicesCredentialsBinding',
                     credentialsId: 'aws-campuscart-ci'
                 ]]) {
+
                     container('kaniko-web') {
                         unstash 'source'
 
                         sh '''
+                            echo "=============================================="
+                            echo "Building campuscart-backend"
+                            echo "=============================================="
+
                             /kaniko/executor \
-                              --context=dir://$(pwd)/campuscart-backend \
-                              --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-backend:${IMAGE_TAG} \
-                              --cache=true
+                                --context=dir://$(pwd)/campuscart-backend \
+                                --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
+                                --destination=${ECR_REGISTRY}/campuscart-backend:${IMAGE_TAG} \
+                                --cache=true
                         '''
                     }
 
@@ -232,11 +261,15 @@ spec:
                         unstash 'source'
 
                         sh '''
+                            echo "=============================================="
+                            echo "Building campuscart-nginx"
+                            echo "=============================================="
+
                             /kaniko/executor \
-                              --context=dir://$(pwd) \
-                              --dockerfile=$(pwd)/nginx/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-nginx:${IMAGE_TAG} \
-                              --cache=true
+                                --context=dir://$(pwd) \
+                                --dockerfile=$(pwd)/nginx/Dockerfile \
+                                --destination=${ECR_REGISTRY}/campuscart-nginx:${IMAGE_TAG} \
+                                --cache=true
                         '''
                     }
                 }
@@ -251,6 +284,58 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
+    - name: render
+      image: alpine:3.20
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+
+            steps {
+                container('render') {
+                    unstash 'source'
+
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-campuscart-ci'
+                    ]]) {
+
+                        sh '''
+                            apk add --no-cache \
+                                bash \
+                                curl \
+                                jq \
+                                gettext
+                        '''
+
+                        dir('terraform/environments/production') {
+
+                            sh '''
+                                echo "Initializing Terraform..."
+                                terraform_version="$(command -v terraform || true)"
+
+                                if [ -z "$terraform_version" ]; then
+                                    echo "Terraform is not installed in this container."
+                                    exit 1
+                                fi
+                            '''
+                        }
+                    }
+
+                    echo "Preparing Kubernetes manifests..."
+                }
+            }
+        }
+
+        stage('Get Terraform Outputs and Render Manifests') {
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
     - name: terraform
       image: hashicorp/terraform:1.10.5
       command: ["cat"]
@@ -258,6 +343,7 @@ spec:
 '''
                 }
             }
+
             steps {
                 container('terraform') {
                     unstash 'source'
@@ -266,7 +352,13 @@ spec:
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
+
+                        sh '''
+                            apk add --no-cache jq gettext
+                        '''
+
                         dir('terraform/environments/production') {
+
                             sh 'terraform init -input=false'
 
                             script {
@@ -281,28 +373,63 @@ spec:
                                 ).trim()
 
                                 env.ECR_BACKEND_IMAGE = sh(
-                                    script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-backend\"'",
+                                    script: '''
+                                        terraform output -json ecr_repository_urls |
+                                        jq -r '."campuscart-backend"'
+                                    ''',
                                     returnStdout: true
                                 ).trim()
 
                                 env.ECR_NGINX_IMAGE = sh(
-                                    script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-nginx\"'",
+                                    script: '''
+                                        terraform output -json ecr_repository_urls |
+                                        jq -r '."campuscart-nginx"'
+                                    ''',
                                     returnStdout: true
                                 ).trim()
                             }
                         }
+
+                        sh '''
+                            echo "=============================================="
+                            echo "Terraform Outputs"
+                            echo "=============================================="
+
+                            echo "RDS Endpoint    : ${RDS_ENDPOINT}"
+                            echo "Redis Endpoint  : ${REDIS_ENDPOINT}"
+                            echo "Backend Image   : ${ECR_BACKEND_IMAGE}"
+                            echo "Nginx Image     : ${ECR_NGINX_IMAGE}"
+                            echo "Image Tag       : ${IMAGE_TAG}"
+
+                            echo "=============================================="
+                        '''
+
+                        sh '''
+                            mkdir -p rendered
+
+                            for file in k8s-aws/*.yaml; do
+
+                                filename="$(basename "$file")"
+
+                                echo "Rendering ${filename}..."
+
+                                envsubst \
+                                    '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
+                                    < "$file" \
+                                    > "rendered/${filename}"
+
+                            done
+
+                            echo "=============================================="
+                            echo "Rendered manifests"
+                            echo "=============================================="
+
+                            ls -lah rendered
+                        '''
+
+                        stash name: 'rendered-manifests',
+                              includes: 'rendered/**'
                     }
-
-                    sh '''
-                        mkdir -p rendered
-
-                        for f in k8s-aws/*.yaml; do
-                            envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
-                                < "$f" > "rendered/$(basename "$f")"
-                        done
-                    '''
-
-                    stash name: 'rendered-manifests', includes: 'rendered/**'
                 }
             }
         }
@@ -316,12 +443,13 @@ kind: Pod
 spec:
   containers:
     - name: kubectl
-      image: amazon/aws-cli:2.17.0
+      image: bitnami/kubectl:latest
       command: ["cat"]
       tty: true
 '''
                 }
             }
+
             steps {
                 container('kubectl') {
                     unstash 'rendered-manifests'
@@ -330,34 +458,110 @@ spec:
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
+
                         sh '''
+                            echo "=============================================="
+                            echo "Configuring EKS access"
+                            echo "=============================================="
+
+                            curl -fsSL \
+                                https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
+                                -o /tmp/awscliv2.zip
+
+                            unzip -q /tmp/awscliv2.zip -d /tmp
+
+                            /tmp/aws/install \
+                                --install-dir /tmp/aws-cli \
+                                --bin-dir /tmp/aws-bin
+
+                            export PATH="/tmp/aws-bin:${PATH}"
+
+                            aws --version
+
                             aws eks update-kubeconfig \
-                                --name ${CLUSTER_NAME} \
-                                --region ${AWS_REGION}
+                                --name "${CLUSTER_NAME}" \
+                                --region "${AWS_REGION}"
                         '''
 
                         sh '''
-                            kubectl apply -f rendered/namespace.yaml
-                            kubectl apply -f rendered/configmap.yaml
-                            kubectl apply -f rendered/serviceaccount.yaml
-                            kubectl apply -f rendered/secretstore.yaml
-                            kubectl apply -f rendered/externalsecret.yaml
-                            kubectl apply -f rendered/backend-deployment.yaml
-                            kubectl apply -f rendered/backend-service.yaml
-                            kubectl apply -f rendered/nginx-deployment.yaml
-                            kubectl apply -f rendered/nginx-service.yaml
-                            kubectl apply -f rendered/ingress.yaml
-                            kubectl apply -f rendered/hpa.yaml
+                            echo "=============================================="
+                            echo "Applying Kubernetes manifests"
+                            echo "=============================================="
+
+                            kubectl apply \
+                                -f rendered/namespace.yaml
+
+                            kubectl apply \
+                                -f rendered/configmap.yaml
+
+                            kubectl apply \
+                                -f rendered/serviceaccount.yaml
+
+                            kubectl apply \
+                                -f rendered/secretstore.yaml
+
+                            kubectl apply \
+                                -f rendered/externalsecret.yaml
+
+                            kubectl apply \
+                                -f rendered/backend-deployment.yaml
+
+                            kubectl apply \
+                                -f rendered/backend-service.yaml
+
+                            kubectl apply \
+                                -f rendered/nginx-deployment.yaml
+
+                            kubectl apply \
+                                -f rendered/nginx-service.yaml
+
+                            kubectl apply \
+                                -f rendered/ingress.yaml
+
+                            kubectl apply \
+                                -f rendered/hpa.yaml
                         '''
 
                         sh '''
-                            kubectl rollout status deployment/campuscart-backend \
+                            echo "=============================================="
+                            echo "Waiting for backend rollout"
+                            echo "=============================================="
+
+                            kubectl rollout status \
+                                deployment/campuscart-backend \
                                 -n campuscart \
                                 --timeout=180s
+                        '''
 
-                            kubectl rollout status deployment/campuscart-nginx \
+                        sh '''
+                            echo "=============================================="
+                            echo "Waiting for nginx rollout"
+                            echo "=============================================="
+
+                            kubectl rollout status \
+                                deployment/campuscart-nginx \
                                 -n campuscart \
                                 --timeout=120s
+                        '''
+
+                        sh '''
+                            echo "=============================================="
+                            echo "Deployment status"
+                            echo "=============================================="
+
+                            kubectl get pods \
+                                -n campuscart \
+                                -o wide
+
+                            echo ""
+
+                            kubectl get svc \
+                                -n campuscart
+
+                            echo ""
+
+                            kubectl get ingress \
+                                -n campuscart
                         '''
                     }
                 }
@@ -367,11 +571,20 @@ spec:
 
     post {
         success {
-            echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
+            echo "=============================================="
+            echo "CAMPUSCART DEPLOYMENT SUCCESSFUL"
+            echo "=============================================="
+            echo "Image Tag: ${env.IMAGE_TAG}"
+            echo "AWS Region: ${env.AWS_REGION}"
+            echo "EKS Cluster: ${env.CLUSTER_NAME}"
         }
 
         failure {
-            echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
+            echo "=============================================="
+            echo "CAMPUSCART DEPLOYMENT FAILED"
+            echo "=============================================="
+            echo "Check the failed stage above."
+            echo "Terraform changes are NOT automatically rolled back."
         }
     }
 }
