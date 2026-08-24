@@ -1136,13 +1136,37 @@ spec:
             }
         }
 
+        stage('Show Terraform Plan') {
+                agent {
+                    kubernetes {
+                        yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+            containers:
+            - name: git
+                image: alpine/git:latest
+                command: ["cat"]
+                tty: true
+            '''
+                    }
+                }
+                steps {
+                    container('git') {
+                        unstash 'tfplan'
+                        sh 'cat terraform/environments/production/tfplan.txt'
+                    }
+                }
+        }
+
         stage('Approve Infrastructure Changes') {
+            // Genuinely agent-less now — `input` alone doesn't touch the
+            // filesystem or run any shell command, so it's the ONLY step that
+            // correctly belongs in an agent-none stage. This also means we're
+            // not holding a Kubernetes pod idle for up to 30 minutes just
+            // waiting on a human click — a real resource-efficiency win.
             agent none
             steps {
-                script {
-                    unstash 'tfplan'
-                    sh 'cat terraform/environments/production/tfplan.txt'
-                }
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
                         message: 'Review the Terraform plan above. Apply these infrastructure changes?',
