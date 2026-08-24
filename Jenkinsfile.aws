@@ -106,7 +106,6 @@ spec:
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
                         message: 'Review the Terraform plan above. Apply these infrastructure changes?',
-                        submitter: 'Bharath'
                     )
                 }
             }
