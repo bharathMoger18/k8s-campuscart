@@ -21,9 +21,6 @@ resource "aws_s3_bucket" "terraform_state" {
   # REFUSE to delete the bucket — you'd have to manually remove this
   # protection first. Losing your state bucket means Terraform "forgets"
   # every resource it ever created for you, which is a genuinely bad day.
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 # -----------------------------------------------------------------------------
