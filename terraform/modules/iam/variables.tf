@@ -20,3 +20,19 @@ variable "cluster_name" {
   description = "Name of the EKS cluster — used to name IAM roles consistently."
   type        = string
 }
+
+
+variable "oidc_provider_arn" {
+  description = "OIDC provider ARN from the eks module — the IRSA trust bridge."
+  type        = string
+}
+
+variable "oidc_provider_url" {
+  description = "OIDC provider URL (no https:// prefix) from the eks module."
+  type        = string
+}
+
+variable "secret_arns" {
+  description = "Specific Secrets Manager ARNs the ESO role is allowed to read — kept explicit and narrow, never a wildcard."
+  type        = list(string)
+}

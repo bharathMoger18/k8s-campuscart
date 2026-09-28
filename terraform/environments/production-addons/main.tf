@@ -30,15 +30,16 @@ resource "helm_release" "external_secrets" {
   create_namespace = true
   version          = "0.10.4"
 
-  set {
-    name  = "serviceAccount.name"
-    value = "external-secrets-sa" # MUST match service_account_name above, exactly — this is the string the IRSA trust condition checks against
-  }
-
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = module.eso_irsa.role_arn
-  }
+  set = [
+    {
+      name  = "serviceAccount.name"
+      value = "external-secrets-sa"
+    },
+    {
+      name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+      value = module.eso_irsa.role_arn
+    }
+  ]
 }
 
 
@@ -76,33 +77,35 @@ resource "helm_release" "alb_controller" {
   namespace  = "kube-system"
   version    = "1.8.1"
 
-  set {
-    name  = "clusterName"
-    value = data.terraform_remote_state.core.outputs.eks_cluster_name
-  }
+  set = [
+    {
+      name  = "clusterName"
+      value = data.terraform_remote_state.core.outputs.eks_cluster_name
+    },
 
-  set {
-    name  = "serviceAccount.create"
-    value = "true"
-  }
+    {
+      name  = "serviceAccount.create"
+      value = "true"
+    },
 
-  set {
-    name  = "serviceAccount.name"
-    value = "aws-load-balancer-controller"
-  }
+    {
+      name  = "serviceAccount.name"
+      value = "aws-load-balancer-controller"
+    },
 
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = module.alb_controller_irsa.role_arn
-  }
+    {
+      name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+      value = module.alb_controller_irsa.role_arn
+    },
 
-  # Required so the controller knows which VPC to operate in — normally
-  # auto-detected via the node's own metadata, but explicit is safer and
-  # avoids a class of "works on some nodes, not others" bugs.
-  set {
-    name  = "vpcId"
-    value = data.terraform_remote_state.core.outputs.vpc_id
-  }
+    # Required so the controller knows which VPC to operate in — normally
+    # auto-detected via the node's own metadata, but explicit is safer and
+    # avoids a class of "works on some nodes, not others" bugs.
+    {
+      name  = "vpcId"
+      value = data.terraform_remote_state.core.outputs.vpc_id
+    }
+  ]
 }
 
 

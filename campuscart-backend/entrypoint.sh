@@ -1,9 +1,9 @@
 #!/bin/sh
+set -e
 
-# Only wait for DB if DB_HOST is explicitly set (local Docker)
 if [ -n "$DB_HOST" ] && [ -n "$DB_PORT" ]; then
     echo "Waiting for PostgreSQL at $DB_HOST:$DB_PORT..."
-    while ! nc -z $DB_HOST $DB_PORT; do
+    until nc -z "$DB_HOST" "$DB_PORT"; do
         sleep 1
     done
     echo "PostgreSQL is ready."
@@ -12,7 +12,16 @@ else
 fi
 
 echo "Running migrations..."
-python manage.py migrate --noinput
+i=0
+until python manage.py migrate --noinput; do
+    i=$((i + 1))
+    if [ "$i" -ge 5 ]; then
+        echo "Migrations failed after 5 attempts. Exiting."
+        exit 1
+    fi
+    echo "Migration attempt $i failed — retrying in 3s..."
+    sleep 3
+done
 
 echo "Collecting static files..."
 python manage.py collectstatic --noinput

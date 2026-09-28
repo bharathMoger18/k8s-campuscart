@@ -116,3 +116,61 @@ resource "aws_iam_role_policy_attachment" "eks_ecr_readonly" {
   role       = aws_iam_role.eks_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
+
+
+# -----------------------------------------------------------------------------
+# RESOURCE 8: Trust policy for External Secrets Operator's IRSA role
+# -----------------------------------------------------------------------------
+# THIS IS DIFFERENT FROM THE EARLIER TRUST POLICIES. Those trusted an AWS
+# SERVICE (eks.amazonaws.com, ec2.amazonaws.com). This one trusts a
+# SPECIFIC KUBERNETES SERVICE ACCOUNT, via the OIDC provider bridge we
+# built in the eks module. The condition is the whole mechanism — it says
+# "only tokens presented FOR this exact service account, in this exact
+# namespace, from THIS cluster's OIDC issuer, are trusted."
+# -----------------------------------------------------------------------------
+# data "aws_iam_policy_document" "eso_trust" {
+#   statement {
+#     effect  = "Allow"
+#     actions = ["sts:AssumeRoleWithWebIdentity"] # different action than before — this is the OIDC federation variant of assume-role
+
+#     principals {
+#       type        = "Federated"
+#       identifiers = [var.oidc_provider_arn] # the trust bridge from the eks module
+#     }
+
+#     condition {
+#       test     = "StringEquals"
+#       variable = "${var.oidc_provider_url}:sub"
+#       # This exact string format — system:serviceaccount:<namespace>:<name>
+#       # — is the Kubernetes convention baked into every service account
+#       # token's "subject" claim. Get this string wrong, even slightly,
+#       # and the trust silently never matches, which is a genuinely common
+#       # IRSA debugging headache worth knowing about upfront.
+#       values = ["system:serviceaccount:external-secrets:external-secrets-sa"]
+#     }
+#   }
+# }
+
+# resource "aws_iam_role" "eso" {
+#   name               = "${var.cluster_name}-eso-role"
+#   assume_role_policy = data.aws_iam_policy_document.eso_trust.json
+# }
+
+# # -----------------------------------------------------------------------------
+# # RESOURCE 9: Custom, narrowly-scoped permission policy — NOT a broad
+# # managed policy this time, because there's no AWS-managed policy for
+# # "read exactly these two specific secrets and nothing else."
+# # -----------------------------------------------------------------------------
+# data "aws_iam_policy_document" "eso_permissions" {
+#   statement {
+#     effect    = "Allow"
+#     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+#     resources = var.secret_arns # passed in — the SPECIFIC secret ARNs this role may read, nothing broader
+#   }
+# }
+
+# resource "aws_iam_role_policy" "eso_permissions" {
+#   name   = "${var.cluster_name}-eso-secrets-policy"
+#   role   = aws_iam_role.eso.id
+#   policy = data.aws_iam_policy_document.eso_permissions.json
+# }
