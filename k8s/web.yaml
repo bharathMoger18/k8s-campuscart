@@ -43,7 +43,7 @@ spec:
           # latest a moment ago might not be latest now. A specific tag
           # is reproducible: this exact Deployment always means this
           # exact, known image, forever.
-          image: 192.168.1.3:5000/campuscart-web:37be2f9
+          image: 192.168.1.3:5000/campuscart-web:43a9661
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
