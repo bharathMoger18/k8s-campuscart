@@ -25,6 +25,18 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # Needed for the migration Job: apply checks existing state (get/list),
+  # kubectl wait polls the Job's status (watch), and we explicitly
+  # delete+recreate it each run since Job specs are immutable.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # A SEPARATE resource from plain "pods" in RBAC terms — having get/list/watch
+  # on pods does NOT include permission to read their logs. Needed only for
+  # our failure-path `kubectl logs job/campuscart-migrate` line.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
