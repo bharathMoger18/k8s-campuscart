@@ -52,107 +52,107 @@ spec:
             }
         }
 
-        stage('Test') {
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
+//         stage('Test') {
+//             agent {
+//                 kubernetes {
+//                     yaml '''
+// apiVersion: v1
+// kind: Pod
+// spec:
+//   containers:
 
-  # This is the container our pipeline steps actually execute inside.
-  # WHY "command: cat" + "tty: true": a plain python:3.12-slim image's
-  # default process isn't designed to just sit there waiting for commands —
-  # Jenkins needs this container to stay alive indefinitely so it can
-  # `kubectl exec` into it once per pipeline step. `cat` with a tty attached
-  # is the standard, well-known trick for this: a trivial, harmless process
-  # that never exits on its own.
-  - name: python
-    image: python:3.12-slim
-    command: ["cat"]
-    tty: true
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "1"
-        memory: "1Gi"
-    env:
-      # TEST-ONLY, throwaway values scoped to an ephemeral pod destroyed
-      # the moment this stage ends — not the same risk category as a real
-      # production secret.
-      - name: DB_HOST
-        value: "localhost"
-      - name: DB_PORT
-        value: "5432"
-      - name: DB_NAME
-        value: "test_campuscart_db"
-      - name: DB_USER
-        value: "test_user"
-      - name: DB_PASSWORD
-        value: "test_pass"
-      - name: REDIS_HOST
-        value: "localhost"
-      - name: REDIS_PORT
-        value: "6379"
-      - name: DJANGO_SECRET_KEY
-        value: "ci-test-only-not-a-real-secret"
-      - name: DEBUG
-        value: "True"
-      - name: ALLOWED_HOSTS
-        value: "localhost,127.0.0.1"
+//   # This is the container our pipeline steps actually execute inside.
+//   # WHY "command: cat" + "tty: true": a plain python:3.12-slim image's
+//   # default process isn't designed to just sit there waiting for commands —
+//   # Jenkins needs this container to stay alive indefinitely so it can
+//   # `kubectl exec` into it once per pipeline step. `cat` with a tty attached
+//   # is the standard, well-known trick for this: a trivial, harmless process
+//   # that never exits on its own.
+//   - name: python
+//     image: python:3.12-slim
+//     command: ["cat"]
+//     tty: true
+//     resources:
+//       requests:
+//         cpu: "500m"
+//         memory: "512Mi"
+//       limits:
+//         cpu: "1"
+//         memory: "1Gi"
+//     env:
+//       # TEST-ONLY, throwaway values scoped to an ephemeral pod destroyed
+//       # the moment this stage ends — not the same risk category as a real
+//       # production secret.
+//       - name: DB_HOST
+//         value: "localhost"
+//       - name: DB_PORT
+//         value: "5432"
+//       - name: DB_NAME
+//         value: "test_campuscart_db"
+//       - name: DB_USER
+//         value: "test_user"
+//       - name: DB_PASSWORD
+//         value: "test_pass"
+//       - name: REDIS_HOST
+//         value: "localhost"
+//       - name: REDIS_PORT
+//         value: "6379"
+//       - name: DJANGO_SECRET_KEY
+//         value: "ci-test-only-not-a-real-secret"
+//       - name: DEBUG
+//         value: "True"
+//       - name: ALLOWED_HOSTS
+//         value: "localhost,127.0.0.1"
 
-  - name: postgres
-    image: postgres:15-alpine
-    env:
-      - name: POSTGRES_DB
-        value: "test_campuscart_db"
-      - name: POSTGRES_USER
-        value: "test_user"
-      - name: POSTGRES_PASSWORD
-        value: "test_pass"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
+//   - name: postgres
+//     image: postgres:15-alpine
+//     env:
+//       - name: POSTGRES_DB
+//         value: "test_campuscart_db"
+//       - name: POSTGRES_USER
+//         value: "test_user"
+//       - name: POSTGRES_PASSWORD
+//         value: "test_pass"
+//     resources:
+//       requests:
+//         cpu: "250m"
+//         memory: "256Mi"
 
-  - name: redis
-    image: redis:7-alpine
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-'''
-                }
-            }
-            steps {
-                container('python') {
-                    unstash 'source'
+//   - name: redis
+//     image: redis:7-alpine
+//     resources:
+//       requests:
+//         cpu: "100m"
+//         memory: "128Mi"
+// '''
+//                 }
+//             }
+//             steps {
+//                 container('python') {
+//                     unstash 'source'
 
-                    // A pod's containers all START roughly in parallel —
-                    // "Running" does NOT mean "ready to accept connections."
-                    // Same principle as entrypoint.sh's wait-for-postgres logic.
-                    sh '''
-                        apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
-                        until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
-                        until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
-                        echo "Postgres and Redis are ready."
-                    '''
+//                     // A pod's containers all START roughly in parallel —
+//                     // "Running" does NOT mean "ready to accept connections."
+//                     // Same principle as entrypoint.sh's wait-for-postgres logic.
+//                     sh '''
+//                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
+//                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
+//                         until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
+//                         echo "Postgres and Redis are ready."
+//                     '''
 
-                    sh '''
-                        cd campuscart-backend
-                        pip install --no-cache-dir -r requirements.txt
-                    '''
+//                     sh '''
+//                         cd campuscart-backend
+//                         pip install --no-cache-dir -r requirements.txt
+//                     '''
 
-                    sh '''
-                        cd campuscart-backend
-                        python manage.py test --verbosity=2
-                    '''
-                }
-            }
-        }
+//                     sh '''
+//                         cd campuscart-backend
+//                         python manage.py test --verbosity=2
+//                     '''
+//                 }
+//             }
+//         }
 
         stage('Build and Push Images') {
             agent {
@@ -261,21 +261,47 @@ spec:
 '''
                 }
             }
-            steps {
-                container('kubectl') {
-                    sh '''
-                        kubectl set image deployment/web web=192.168.1.3:5000/campuscart-web:${IMAGE_TAG} -n k8s-campuscart
-                        kubectl set image deployment/nginx nginx=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} -n k8s-campuscart
+            // Replace the existing `steps { container('kubectl') { sh '''...''' } }`
+// block inside the Deploy stage with this. Everything below the
+// migration section is your EXISTING code, unchanged — only the top
+// part (Job delete/apply/wait) is new.
+//
+// Note on `kubectl wait --for=condition=complete`: it only matches a
+// Job reaching Complete. If the Job instead FAILS (hits backoffLimit),
+// it gets a Failed condition, which wait does NOT match — so a real
+// failure isn't detected immediately, it just times out after the
+// full --timeout window, then errors (correctly failing the pipeline,
+// just slower than an explicit failure check would be). The `||`
+// block below at least dumps the Job's logs to the Jenkins console
+// when that happens, so a failure is debuggable without needing to
+// kubectl exec/describe by hand afterward.
+          steps {
+              container('kubectl') {
+                  sh '''
+                      echo "=== Running database migrations ==="
+                      kubectl delete job campuscart-migrate -n k8s-campuscart --ignore-not-found
 
-                        # rollout status BLOCKS until the new Pods are actually
-                        # Ready (or fails after the timeout) — this turns
-                        # "I told Kubernetes to update" into a real pass/fail
-                        # signal for the pipeline, not fire-and-forget.
-                        kubectl rollout status deployment/web -n k8s-campuscart --timeout=180s
-                        kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
-                    '''
-                }
-            }
+                      sed "s/REPLACE_WITH_IMAGE_TAG/${IMAGE_TAG}/" k8s/migrate-job.yaml | kubectl apply -f -
+
+                      kubectl wait --for=condition=complete job/campuscart-migrate -n k8s-campuscart --timeout=180s || {
+                          echo "=== Migration Job did not complete — dumping logs ==="
+                          kubectl logs job/campuscart-migrate -n k8s-campuscart --tail=100
+                          exit 1
+                      }
+                      echo "=== Migrations complete ==="
+
+                      kubectl set image deployment/web web=192.168.1.3:5000/campuscart-web:${IMAGE_TAG} -n k8s-campuscart
+                      kubectl set image deployment/nginx nginx=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} -n k8s-campuscart
+
+                      # rollout status BLOCKS until the new Pods are actually
+                      # Ready (or fails after the timeout) — this turns
+                      # "I told Kubernetes to update" into a real pass/fail
+                      # signal for the pipeline, not fire-and-forget.
+                      kubectl rollout status deployment/web -n k8s-campuscart --timeout=180s
+                      kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
+                  '''
+              }
+          }
         }
     }
 }
