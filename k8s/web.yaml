@@ -50,7 +50,13 @@ spec:
         # (a manual copy of cert-manager's campuscart-ca-secret) into
         # the agent sidecar; ca-cert points at the file inside it.
         vault.hashicorp.com/agent-extra-secret: "vault-ca-cert"
-        vault.hashicorp.com/ca-cert: "/vault/secrets/vault-ca-cert/ca.crt"
+        # Confirmed twice now from the live pod's actual volumeMounts:
+        # the extra-secrets volume mounts directly at /vault/custom —
+        # there is NO subdirectory named after the secret. The secret's
+        # own key (ca.crt) lands straight at /vault/custom/ca.crt.
+        # Got this wrong twice by assuming a nesting structure that
+        # doesn't exist; this path is read directly off the pod spec.
+        vault.hashicorp.com/ca-cert: "/vault/custom/ca.crt"
 
         # Four Vault reads, rendered into ONE file so entrypoint.sh
         # only has to source one path: /vault/secrets/campuscart.env
@@ -58,24 +64,38 @@ spec:
         vault.hashicorp.com/agent-inject-template-campuscart.env: |
           {{- with secret "secret/data/campuscart/django" -}}
           DJANGO_SECRET_KEY={{ .Data.data.DJANGO_SECRET_KEY }}
-          {{- end }}
+          {{ end }}
           {{- with secret "secret/data/campuscart/email" -}}
           EMAIL_HOST_USER={{ .Data.data.EMAIL_HOST_USER }}
           EMAIL_HOST_PASSWORD={{ .Data.data.EMAIL_HOST_PASSWORD }}
-          {{- end }}
+          {{ end }}
           {{- with secret "secret/data/campuscart/stripe" -}}
           STRIPE_PUBLISHABLE_KEY={{ .Data.data.STRIPE_PUBLISHABLE_KEY }}
           STRIPE_SECRET_KEY={{ .Data.data.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET={{ .Data.data.STRIPE_WEBHOOK_SECRET }}
-          {{- end }}
+          {{ end }}
           {{- with secret "secret/data/campuscart/vapid" -}}
           VAPID_PUBLIC_KEY={{ .Data.data.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY={{ .Data.data.VAPID_PRIVATE_KEY }}
-          {{- end }}
+          {{ end }}
 
         # Owner-read-only — this file holds every static secret the
         # app needs.
         vault.hashicorp.com/agent-inject-perms-campuscart.env: "0400"
+
+        # --- Dynamic database credentials (Session 2c) ---
+        # A SEPARATE file from campuscart.env on purpose: this one's
+        # contents genuinely change at runtime — Vault Agent watches
+        # this secret's lease and re-renders the file with a brand-new
+        # generated user when it renews or expires (default_ttl=1h).
+        # campuscart.env never changes after being written once.
+        vault.hashicorp.com/agent-inject-secret-db-creds.env: "database/creds/campuscart-app"
+        vault.hashicorp.com/agent-inject-template-db-creds.env: |
+          {{- with secret "database/creds/campuscart-app" -}}
+          DB_USER={{ .Data.username }}
+          DB_PASSWORD={{ .Data.password }}
+          {{ end }}
+        vault.hashicorp.com/agent-inject-perms-db-creds.env: "0400"
     spec:
       serviceAccountName: web
       containers:
@@ -125,6 +145,7 @@ spec:
               port: 8000
             failureThreshold: 30
             periodSeconds: 10
+            timeoutSeconds: 3
           readinessProbe:
             httpGet:
               path: /api/v1/products/

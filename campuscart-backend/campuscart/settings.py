@@ -88,7 +88,7 @@ if DATABASE_URL:
 else:
     DATABASES = {
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
+            "ENGINE": "campuscart.db_backend",
             "NAME": os.getenv("DB_NAME", "campuscart_db"),
             "USER": os.getenv("DB_USER", "campuscart_user"),
             "PASSWORD": os.getenv("DB_PASSWORD", ""),

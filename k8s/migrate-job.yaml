@@ -1,0 +1,82 @@
+# k8s/migrate-job.yaml
+#
+# Runs once per deploy, before web is rolled. Uses the SAME image as
+# web (it has manage.py and entrypoint.sh already), but sets
+# MIGRATE_ONLY=true so entrypoint.sh runs migrate/collectstatic/
+# superuser-bootstrap and exits, instead of starting Daphne.
+#
+# IMAGE TAG: Jenkins substitutes this at deploy time (see Jenkinsfile
+# change below) — this file's tag is a placeholder for manual applies.
+#
+# NAME: Jobs are immutable once created — you can't kubectl apply an
+# update to an existing Job's pod template. Jenkins deletes any prior
+# migrate Job before creating this one each run (see Jenkinsfile).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: campuscart-migrate
+  namespace: k8s-campuscart
+spec:
+  # Don't retry forever if migrations genuinely fail — 2 attempts then
+  # stop, so a broken migration doesn't loop silently.
+  backoffLimit: 2
+  template:
+    metadata:
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "campuscart-migrate"
+        vault.hashicorp.com/service: "https://vault.vault.svc.cluster.local:8200"
+        vault.hashicorp.com/agent-extra-secret: "vault-ca-cert"
+        vault.hashicorp.com/ca-cert: "/vault/custom/ca.crt"
+
+        # Init-container-only — no persistent sidecar. A Job is only
+        # "Complete" once every container in its pod exits; the normal
+        # injector sidecar stays alive to renew leases, which would
+        # keep this pod Running forever and the Job would never finish.
+        # This annotation renders the secret once and skips the
+        # sidecar entirely — correct for a one-shot Job, wrong for
+        # web's long-running Deployment (which needs the sidecar for
+        # its dynamic role's lease renewal).
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+
+        # Same filename/format as web's dynamic db-creds.env, but
+        # sourced from the STATIC campuscart_user credential in KV —
+        # this Job needs real DDL rights to run migrations.
+        vault.hashicorp.com/agent-inject-secret-db-creds.env: "secret/data/campuscart/migrate"
+        vault.hashicorp.com/agent-inject-template-db-creds.env: |
+          {{- with secret "secret/data/campuscart/migrate" -}}
+          DB_USER={{ .Data.data.DB_USER }}
+          DB_PASSWORD={{ .Data.data.DB_PASSWORD }}
+          {{ end }}
+        vault.hashicorp.com/agent-inject-perms-db-creds.env: "0400"
+    spec:
+      serviceAccountName: migrate
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: 192.168.1.3:5000/campuscart-web:REPLACE_WITH_IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MIGRATE_ONLY
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: campuscart-config
+          volumeMounts:
+            - name: campuscart-shared
+              mountPath: /app/staticfiles
+              subPath: staticfiles
+            - name: campuscart-shared
+              mountPath: /app/media
+              subPath: media
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: campuscart-shared
+          persistentVolumeClaim:
+            claimName: campuscart-shared
