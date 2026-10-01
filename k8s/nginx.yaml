@@ -5,20 +5,16 @@ metadata:
   name: nginx
   namespace: k8s-campuscart
 spec:
-  # NodePort: on a bare-metal kubeadm cluster (no cloud provider), there's
-  # no automatic external load balancer the way there is on EKS/GKE. NodePort
-  # is the standard bare-metal answer — it opens the SAME port on every node
-  # in the cluster, and traffic hitting any node on that port gets routed to
-  # this Service. (The more advanced real-world answer is MetalLB for true
-  # LoadBalancer support, or an Ingress controller — both worth knowing by
-  # name for an interview, even though NodePort is what we're using here.)
-  type: NodePort
+  # Switched from NodePort to ClusterIP: traffic now arrives exclusively
+  # via the ingress-nginx controller -> this Service's ClusterIP (see
+  # campuscart-monolith-ingress). NodePort/30081 was dead weight once
+  # the ingress path existed — one less open port on every node.
+  type: ClusterIP
   selector:
     app: nginx
   ports:
     - port: 80
-      targetPort: 80
-      nodePort: 30081
+      targetPort: 8080
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -38,10 +34,19 @@ spec:
       serviceAccountName: nginx
       containers:
         - name: nginx
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
           image: 192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG}
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           volumeMounts:
             - name: campuscart-shared
               mountPath: /app/staticfiles
@@ -51,12 +56,12 @@ spec:
               subPath: media
           readinessProbe:
             tcpSocket:
-              port: 80
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             tcpSocket:
-              port: 80
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:

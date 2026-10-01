@@ -44,6 +44,16 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          args: ["redis-server", "--save", ""]
           ports:
             - containerPort: 6379
           readinessProbe:

@@ -44,9 +44,20 @@ spec:
       labels:
         app: postgres
     spec:
+      securityContext:
+        fsGroup: 70
       serviceAccountName: postgres
       containers:
         - name: postgres
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
           image: postgres:15-alpine
           ports:
             - containerPort: 5432
@@ -100,10 +111,20 @@ spec:
         # localhost, not through the Service — same pod, no network hop.
         # ------------------------------------------------------------------
         - name: postgres-exporter
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
           image: prometheuscommunity/postgres-exporter:v0.15.0
           ports:
             - name: metrics
               containerPort: 9187
+              
           env:
             - name: POSTGRES_USER
               valueFrom:
