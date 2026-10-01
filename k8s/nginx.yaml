@@ -48,6 +48,8 @@ spec:
           ports:
             - containerPort: 8080
           volumeMounts:
+            - name: nginx-run
+              mountPath: /run
             - name: campuscart-shared
               mountPath: /app/staticfiles
               subPath: staticfiles
@@ -72,6 +74,8 @@ spec:
               cpu: "250m"
               memory: "256Mi"
       volumes:
+        - name: nginx-run
+          emptyDir: {}
         - name: campuscart-shared
           persistentVolumeClaim:
             claimName: campuscart-shared
