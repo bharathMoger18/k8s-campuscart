@@ -4,7 +4,6 @@ RUN rm /etc/nginx/conf.d/default.conf
 
 # pid is only valid in nginx's main context, not inside a conf.d include —
 # patch the base image's own nginx.conf to add it there.
-RUN sed -i '1i pid /var/cache/nginx/nginx.pid;' /etc/nginx/nginx.conf
 
 COPY nginx/nginx.conf /etc/nginx/conf.d/campuscart.conf
 COPY frontend /app/frontend
