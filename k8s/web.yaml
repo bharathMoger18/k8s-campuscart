@@ -100,6 +100,15 @@ spec:
       serviceAccountName: web
       containers:
         - name: web
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 101
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
           # Pinned to the exact commit-SHA tag Kaniko built and pushed —
           # NOT ':latest'. Kubernetes treats ':latest' specially: its
           # default imagePullPolicy is ALWAYS re-pull, every single Pod
@@ -112,7 +121,7 @@ spec:
           # NOTE: this tag is currently stale — the pod actually running
           # in the cluster is on f53956d, not this. Needs the sed/commit
           # fix from Session 1, separate from this Vault change.
-          image: 192.168.1.3:5000/campuscart-web:43a9661
+          image: 192.168.1.3:5000/campuscart-web:${IMAGE_TAG}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

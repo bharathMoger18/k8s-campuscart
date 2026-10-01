@@ -276,32 +276,29 @@ spec:
 // when that happens, so a failure is debuggable without needing to
 // kubectl exec/describe by hand afterward.
           steps {
-              container('kubectl') {
-                  sh '''
-                      echo "=== Running database migrations ==="
-                      kubectl delete job campuscart-migrate -n k8s-campuscart --ignore-not-found
+                container('kubectl') {
+                    sh '''
+                        echo "=== Running database migrations ==="
+                        kubectl delete job campuscart-migrate -n k8s-campuscart --ignore-not-found
 
-                      sed "s/REPLACE_WITH_IMAGE_TAG/${IMAGE_TAG}/" k8s/migrate-job.yaml | kubectl apply -f -
+                        envsubst '${IMAGE_TAG}' < k8s/migrate-job.yaml | kubectl apply -f -
 
-                      kubectl wait --for=condition=complete job/campuscart-migrate -n k8s-campuscart --timeout=180s || {
-                          echo "=== Migration Job did not complete — dumping logs ==="
-                          kubectl logs job/campuscart-migrate -n k8s-campuscart --tail=100
-                          exit 1
-                      }
-                      echo "=== Migrations complete ==="
+                        kubectl wait --for=condition=complete job/campuscart-migrate -n k8s-campuscart --timeout=180s || {
+                            echo "=== Migration Job did not complete — dumping logs ==="
+                            kubectl logs job/campuscart-migrate -n k8s-campuscart --tail=100
+                            exit 1
+                        }
+                        echo "=== Migrations complete ==="
 
-                      kubectl set image deployment/web web=192.168.1.3:5000/campuscart-web:${IMAGE_TAG} -n k8s-campuscart
-                      kubectl set image deployment/nginx nginx=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} -n k8s-campuscart
+                        echo "=== Applying full manifests (real GitOps, not just image tag) ==="
+                        envsubst '${IMAGE_TAG}' < k8s/web.yaml | kubectl apply -f -
+                        envsubst '${IMAGE_TAG}' < k8s/nginx.yaml | kubectl apply -f -
 
-                      # rollout status BLOCKS until the new Pods are actually
-                      # Ready (or fails after the timeout) — this turns
-                      # "I told Kubernetes to update" into a real pass/fail
-                      # signal for the pipeline, not fire-and-forget.
-                      kubectl rollout status deployment/web -n k8s-campuscart --timeout=180s
-                      kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
-                  '''
-              }
-          }
+                        kubectl rollout status deployment/web -n k8s-campuscart --timeout=180s
+                        kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
+                    '''
+                }
+            }
         }
     }
 }

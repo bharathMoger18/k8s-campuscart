@@ -38,7 +38,7 @@ spec:
       serviceAccountName: nginx
       containers:
         - name: nginx
-          image: 192.168.1.3:5000/campuscart-nginx:43a9661
+          image: 192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
