@@ -1,6 +1,6 @@
 FROM nginx:alpine 
 
-RUN chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx
+RUN chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx /run
 RUN rm /etc/nginx/conf.d/default.conf
 
 # pid is only valid in nginx's main context, not inside a conf.d include —
