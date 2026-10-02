@@ -1,0 +1,42 @@
+# k8s/internal-tls-certs.yaml
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ingress-nginx-tls
+  namespace: ingress-nginx
+spec:
+  secretName: ingress-nginx-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - campuscart.bharathops.online
+  issuerRef:
+    name: campuscart-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nginx-backend-tls
+  namespace: k8s-campuscart
+spec:
+  secretName: nginx-backend-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - nginx
+    - nginx.k8s-campuscart
+    - nginx.k8s-campuscart.svc
+    - nginx.k8s-campuscart.svc.cluster.local
+  issuerRef:
+    name: campuscart-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

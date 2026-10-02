@@ -13,8 +13,12 @@ spec:
   selector:
     app: nginx
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8080
+    - name: https
+      port: 443
+      targetPort: 8443
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -47,6 +51,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+            - containerPort: 8443
           volumeMounts:
             - name: nginx-run
               mountPath: /run
@@ -56,6 +61,9 @@ spec:
             - name: campuscart-shared
               mountPath: /app/media
               subPath: media
+            - name: nginx-tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
           readinessProbe:
             tcpSocket:
               port: 8080
@@ -79,3 +87,6 @@ spec:
         - name: campuscart-shared
           persistentVolumeClaim:
             claimName: campuscart-shared
+        - name: nginx-tls
+          secret:
+            secretName: nginx-backend-tls
