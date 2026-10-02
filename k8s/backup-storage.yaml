@@ -1,0 +1,41 @@
+# k8s/backup-storage.yaml
+# Reuses the "local-storage" StorageClass already created for Vault
+# (Session 2a) — no need to redefine it. This PV is pinned to
+# k8s-worker1 specifically, NOT worker2 where Vault's data lives, so
+# a single node's disk failure can't take out both the secrets store
+# and the backups meant to help recover from a disaster.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-backups-worker1
+spec:
+  capacity:
+    storage: 5Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /var/lib/postgres-backups
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k8s-worker1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backups
+  namespace: k8s-campuscart
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-storage
+  resources:
+    requests:
+      storage: 5Gi

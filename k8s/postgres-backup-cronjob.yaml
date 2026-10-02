@@ -1,0 +1,128 @@
+# k8s/postgres-backup-cronjob.yaml
+#
+# Runs daily at 02:00 UTC. Dumps campuscart_db via pg_dump (logical
+# backup — portable, restorable with nothing but psql, easy to
+# inspect), gzips it, writes it to the dedicated backups PVC, then
+# prunes anything beyond the 7 most recent files.
+#
+# Uses a READ-ONLY Postgres role (campuscart_backup, member of the
+# built-in pg_read_all_data), not the migrate Job's superuser
+# credential — a backup job only ever needs to read.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: k8s-campuscart
+spec:
+  schedule: "0 2 * * *"
+  # Don't let a slow/stuck run overlap with the next scheduled one.
+  concurrencyPolicy: Forbid
+  # Keep a little history in `kubectl get jobs` for debugging, but not
+  # unbounded — the actual backups live on the PVC, not as Job objects.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          annotations:
+            vault.hashicorp.com/agent-inject: "true"
+            vault.hashicorp.com/role: "campuscart-backup"
+            vault.hashicorp.com/service: "https://vault.vault.svc.cluster.local:8200"
+            vault.hashicorp.com/agent-extra-secret: "vault-ca-cert"
+            vault.hashicorp.com/ca-cert: "/vault/custom/ca.crt"
+            # Init-container-only, same reasoning as the migration Job —
+            # a CronJob's pod needs to fully exit to count as Complete,
+            # and the normal persistent sidecar would block that forever.
+            vault.hashicorp.com/agent-pre-populate-only: "true"
+            vault.hashicorp.com/agent-inject-secret-db-creds.env: "secret/data/campuscart/backup"
+            vault.hashicorp.com/agent-inject-template-db-creds.env: |
+              {{- with secret "secret/data/campuscart/backup" -}}
+              DB_USER={{ .Data.data.DB_USER }}
+              DB_PASSWORD={{ .Data.data.DB_PASSWORD }}
+              {{ end }}
+            # 0440, not 0400: the file is written by vault-agent-init,
+            # which runs as Vault's own uid (100) — NOT the same uid as
+            # this Job's main container (70, matching postgres). 0400
+            # (owner-only) would be unreadable here. The pod's fsGroup:
+            # 70 below makes Kubernetes assign the volume's group
+            # ownership to 70, so 0440 (owner+group read) lets our
+            # uid-70 container read a file owned by a different uid.
+            vault.hashicorp.com/agent-inject-perms-db-creds.env: "0440"
+        spec:
+          serviceAccountName: backup
+          restartPolicy: Never
+          securityContext:
+            fsGroup: 70
+          containers:
+            - name: backup
+              image: postgres:15-alpine
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 70
+                runAsGroup: 70
+                allowPrivilegeEscalation: false
+                seccompProfile:
+                  type: RuntimeDefault
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: DB_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: campuscart-config
+                      key: DB_HOST
+                - name: DB_PORT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: campuscart-config
+                      key: DB_PORT
+                # Not sensitive — the database name, same value already
+                # visible throughout this project in plain text.
+                - name: DB_NAME
+                  value: "campuscart_db"
+                - name: RETENTION_COUNT
+                  value: "7"
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  echo "Loading backup credentials from Vault..."
+                  . /vault/secrets/db-creds.env
+                  export PGPASSWORD="$DB_PASSWORD"
+
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  OUTFILE="/backups/campuscart-${TIMESTAMP}.sql.gz"
+
+                  echo "Dumping campuscart_db to ${OUTFILE}..."
+                  pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" | gzip > "$OUTFILE"
+
+                  SIZE=$(stat -c %s "$OUTFILE")
+                  if [ "$SIZE" -lt 100 ]; then
+                    echo "Backup file suspiciously small (${SIZE} bytes) — treating as failure."
+                    rm -f "$OUTFILE"
+                    exit 1
+                  fi
+                  echo "Backup complete: ${OUTFILE} (${SIZE} bytes)"
+
+                  echo "Pruning old backups, keeping the ${RETENTION_COUNT} most recent..."
+                  cd /backups
+                  ls -1t campuscart-*.sql.gz | tail -n +$((RETENTION_COUNT + 1)) | xargs -r rm -v
+                  echo "Current backups:"
+                  ls -la /backups/campuscart-*.sql.gz
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "250m"
+                  memory: "256Mi"
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: postgres-backups
