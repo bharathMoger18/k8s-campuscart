@@ -40,3 +40,22 @@ spec:
     name: campuscart-ca-issuer
     kind: ClusterIssuer
     group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cloudflare-edge-tls
+  namespace: k8s-campuscart
+spec:
+  secretName: cloudflare-edge-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - campuscart.bharathops.online
+  issuerRef:
+    name: campuscart-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
