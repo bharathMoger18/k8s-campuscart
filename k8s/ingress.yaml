@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: campuscart-monolith-ingress
+  namespace: k8s-campuscart
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-secret: "k8s-campuscart/nginx-backend-tls"
+    nginx.ingress.kubernetes.io/proxy-ssl-name: "nginx.k8s-campuscart.svc.cluster.local"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: campuscart.bharathops.online
+      http:
+        paths:
+          - backend:
+              service:
+                name: nginx
+                port:
+                  number: 443
+            path: /
+            pathType: Prefix
