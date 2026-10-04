@@ -164,7 +164,7 @@ spec:
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /api/v1/products/
+              path: /healthz
               port: 8000
             periodSeconds: 15
             timeoutSeconds: 3
