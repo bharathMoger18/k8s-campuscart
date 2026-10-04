@@ -294,7 +294,7 @@ spec:
                         envsubst '${IMAGE_TAG}' < k8s/web.yaml | kubectl apply -f -
                         envsubst '${IMAGE_TAG}' < k8s/nginx.yaml | kubectl apply -f -
 
-                        kubectl rollout status deployment/web -n k8s-campuscart --timeout=180s
+                        kubectl rollout status deployment/web -n k8s-campuscart --timeout=600s
                         kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
                     '''
                 }
