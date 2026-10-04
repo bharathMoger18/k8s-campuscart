@@ -4,7 +4,7 @@ from django.urls import path, include, re_path
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.static import serve
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse
 from push.views import service_worker
 from products.views import product_redirect_view
 import os
@@ -29,7 +29,13 @@ def serve_frontend(request, path=''):
     
     raise Http404(f"File not found: {path}")
 
+# Liveness endpoint: no DB, no auth; must sit above the catch-all route below.
+async def healthz(request):
+    return HttpResponse("ok", content_type="text/plain")
+
+
 urlpatterns = [
+    path("healthz", healthz, name="healthz"),
     path("admin/", admin.site.urls),
     path("products/<int:pk>/", product_redirect_view, name="product-view"),
     path("api/v1/", include(("campuscart.api_urls", "api"), namespace="v1")),
