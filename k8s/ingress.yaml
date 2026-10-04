@@ -10,6 +10,10 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-ssl-name: "nginx.k8s-campuscart.svc.cluster.local"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - campuscart.bharathops.online
+      secretName: cloudflare-edge-tls
   rules:
     - host: campuscart.bharathops.online
       http:
