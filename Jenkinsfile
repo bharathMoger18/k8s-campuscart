@@ -37,10 +37,30 @@ spec:
                     // boxes. env.X set here persists for the WHOLE pipeline
                     // run (it lives in Jenkins' build context, not inside
                     // any one pod), so every later stage can just read
-                    // env.IMAGE_TAG directly, no matter which pod it's in.
+                    // env.WEB_TAG and env.NGINX_TAG directly, no matter which pod it's in.
                     script {
                         sh 'git config --global --add safe.directory "$(pwd)"'
-                        env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        // Tag each image by the LAST COMMIT THAT TOUCHED ITS INPUTS, not by the
+                        // current commit. A commit that only edits a manifest or the Jenkinsfile
+                        // then gives the same tag as before, so the image build can be skipped.
+                        //   web   is built from campuscart-backend/
+                        //   nginx is built from nginx/, frontend/ and the root .dockerignore
+                        def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
+                        def webTag   = sh(script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7', returnStdout: true).trim() ?: head
+                        def nginxTag = sh(script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7', returnStdout: true).trim() ?: head
+
+                        // Ask the registry whether that tag already exists (a HEAD request for the
+                        // manifest; BusyBox wget --spider exits non-zero on a 404). On any error the
+                        // tag counts as missing, which only means we build (the safe default).
+                        def accept = 'application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json'
+                        def webExists   = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-web/manifests/${webTag}", returnStatus: true) == 0
+                        def nginxExists = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-nginx/manifests/${nginxTag}", returnStatus: true) == 0
+
+                        env.WEB_TAG      = webTag
+                        env.NGINX_TAG    = nginxTag
+                        env.WEB_EXISTS   = webExists ? 'true' : 'false'
+                        env.NGINX_EXISTS = nginxExists ? 'true' : 'false'
+                        echo "web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
                     }
                     // Stash the checked-out code so LATER stages (which run
                     // in COMPLETELY DIFFERENT pods) can retrieve it. Each
@@ -155,6 +175,12 @@ spec:
 //         }
 
         stage('Build and Push Images') {
+            when {
+                // beforeAgent: decide BEFORE Jenkins starts the Kaniko pod, so a skipped
+                // stage costs nothing (no pod startup).
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -206,10 +232,11 @@ spec:
                     // plain HTTP, no TLS. A real company's registry would
                     // have real TLS and these flags simply wouldn't exist.
                     sh '''
+                        if [ "${WEB_EXISTS}" = "true" ]; then echo "web image ${WEB_TAG} is already in the registry, skipping its build"; exit 0; fi
                         /kaniko/executor \
                           --context=dir://$(pwd)/campuscart-backend \
                           --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-                          --destination=192.168.1.3:5000/campuscart-web:${IMAGE_TAG} \
+                          --destination=192.168.1.3:5000/campuscart-web:${WEB_TAG} \
                           --destination=192.168.1.3:5000/campuscart-web:latest \
                           --insecure \
                           --insecure-pull \
@@ -220,10 +247,11 @@ spec:
                 container('kaniko-nginx') {
                     unstash 'source'
                     sh '''
+                        if [ "${NGINX_EXISTS}" = "true" ]; then echo "nginx image ${NGINX_TAG} is already in the registry, skipping its build"; exit 0; fi
                         /kaniko/executor \
                           --context=dir://$(pwd) \
                           --dockerfile=$(pwd)/nginx/Dockerfile \
-                          --destination=192.168.1.3:5000/campuscart-nginx:${IMAGE_TAG} \
+                          --destination=192.168.1.3:5000/campuscart-nginx:${NGINX_TAG} \
                           --destination=192.168.1.3:5000/campuscart-nginx:latest \
                           --insecure \
                           --insecure-pull \
@@ -278,10 +306,11 @@ spec:
           steps {
                 container('kubectl') {
                     sh '''
+                        [ -n "${WEB_TAG}" ] && [ -n "${NGINX_TAG}" ] || { echo "WEB_TAG or NGINX_TAG is empty, refusing to deploy"; exit 1; }
                         echo "=== Running database migrations ==="
                         kubectl delete job campuscart-migrate -n k8s-campuscart --ignore-not-found
 
-                        envsubst '${IMAGE_TAG}' < k8s/migrate-job.yaml | kubectl apply -f -
+                        envsubst '${WEB_TAG}' < k8s/migrate-job.yaml | kubectl apply -f -
 
                         kubectl wait --for=condition=complete job/campuscart-migrate -n k8s-campuscart --timeout=180s || {
                             echo "=== Migration Job did not complete — dumping logs ==="
@@ -291,8 +320,8 @@ spec:
                         echo "=== Migrations complete ==="
 
                         echo "=== Applying full manifests (real GitOps, not just image tag) ==="
-                        envsubst '${IMAGE_TAG}' < k8s/web.yaml | kubectl apply -f -
-                        envsubst '${IMAGE_TAG}' < k8s/nginx.yaml | kubectl apply -f -
+                        envsubst '${WEB_TAG}' < k8s/web.yaml | kubectl apply -f -
+                        envsubst '${NGINX_TAG}' < k8s/nginx.yaml | kubectl apply -f -
 
                         kubectl rollout status deployment/web -n k8s-campuscart --timeout=600s
                         kubectl rollout status deployment/nginx -n k8s-campuscart --timeout=120s
