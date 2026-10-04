@@ -96,6 +96,7 @@ spec:
           DB_PASSWORD={{ .Data.password }}
           {{ end }}
         vault.hashicorp.com/agent-inject-perms-db-creds.env: "0400"
+        vault.hashicorp.com/agent-requests-cpu: "50m"
     spec:
       serviceAccountName: web
       affinity:
@@ -109,6 +110,8 @@ spec:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
+          matchLabelKeys:
+            - pod-template-hash
           labelSelector:
             matchLabels:
               app: web
@@ -194,3 +197,17 @@ spec:
         - name: campuscart-shared
           persistentVolumeClaim:
             claimName: campuscart-shared
+---
+# PodDisruptionBudget: limits VOLUNTARY disruptions (kubectl drain, node
+# upgrades) so they can never evict every web replica at once. It does NOT
+# cover crashes, laptop sleep/shutdown, or rolling updates.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: k8s-campuscart
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: web
