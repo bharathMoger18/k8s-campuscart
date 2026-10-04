@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared-config
+  namespace: cloudflare-tunnel
+data:
+  config.yaml: |
+    tunnel: ba79a1ac-3cef-4bd2-9de9-debc15020e76
+    credentials-file: /etc/cloudflared/creds/credentials.json
+    metrics: 0.0.0.0:2000
+    ingress:
+      - hostname: campuscart.bharathops.online
+        service: https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
+        originRequest:
+          caPool: /etc/cloudflared/ca/ca.crt
+          originServerName: campuscart.bharathops.online
+      - service: http_status:404
