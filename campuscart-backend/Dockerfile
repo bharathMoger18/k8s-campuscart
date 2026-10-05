@@ -62,7 +62,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ## - curl:             used by docker-compose's HEALTHCHECK to verify
 ##                     the app is actually serving requests, not just
 ##                     that the process exists.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     libpq5 \
     netcat-openbsd \
     curl \
