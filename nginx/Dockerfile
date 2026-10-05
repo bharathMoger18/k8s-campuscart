@@ -1,5 +1,7 @@
 FROM nginx:alpine 
 
+RUN apk upgrade --no-cache
+
 RUN chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx /run
 RUN rm /etc/nginx/conf.d/default.conf
 

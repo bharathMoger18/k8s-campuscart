@@ -17,7 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ## from source. These add ~200MB and a real compiler toolchain to
 ## whatever image they're installed in — which is exactly why they
 ## live in a stage we throw away, never in the final image.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
