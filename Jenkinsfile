@@ -174,6 +174,52 @@ spec:
 //             }
 //         }
 
+        stage('Security Scan') {
+            // Runs only when the web image is about to be built. It runs BEFORE
+            // the build (not alongside it) on purpose: if the scan fails, no image
+            // reaches the registry, so retrying the same commit cannot skip both
+            // the scan and the build because the tag already exists.
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: python
+    image: python:3.12-slim
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+'''
+                }
+            }
+            steps {
+                container('python') {
+                    unstash 'source'
+                    sh '''
+                        pip install --no-cache-dir -q pip-audit bandit
+                        cd campuscart-backend
+                        # bandit: fail on MEDIUM severity and above (-ll). Today it only reports
+                        # Low findings (fixture passwords in tests, two try/except/pass).
+                        bandit -r . -q -ll
+                        # pip-audit: fail on ANY known vulnerability in the pinned versions.
+                        pip-audit -r requirements.txt --no-deps --disable-pip
+                    '''
+                }
+            }
+        }
+
         stage('Build and Push Images') {
             when {
                 // beforeAgent: decide BEFORE Jenkins starts the Kaniko pod, so a skipped
