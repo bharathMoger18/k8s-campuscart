@@ -1,0 +1,368 @@
+// Jenkinsfile.gitops: CI only. Builds and verifies images, then records the new
+// image tags in the config repo. Argo CD does the deploying (it watches that repo).
+pipeline {
+    agent none
+
+    parameters {
+        // Branch of campuscart-config that receives the tag commit. 'ci-test' is safe:
+        // Argo CD only watches 'main'. Change the default to 'main' to deploy for real.
+        string(name: 'CONFIG_BRANCH', defaultValue: 'ci-test', description: 'campuscart-config branch to commit image tags to')
+    }
+
+    environment {
+        CONFIG_BRANCH = "${params.CONFIG_BRANCH}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: git
+    image: alpine/git:latest
+    command: ["cat"]
+    tty: true
+'''
+                }
+            }
+            steps {
+                container('git') {
+                    checkout scm
+                    script {
+                        sh 'git config --global --add safe.directory "$(pwd)"'
+                        def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
+                        def webTag   = sh(script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7', returnStdout: true).trim() ?: head
+                        def nginxTag = sh(script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7', returnStdout: true).trim() ?: head
+
+                        def accept = 'application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json'
+                        def webExists   = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-web/manifests/${webTag}", returnStatus: true) == 0
+                        def nginxExists = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-nginx/manifests/${nginxTag}", returnStatus: true) == 0
+
+                        env.WEB_TAG      = webTag
+                        env.NGINX_TAG    = nginxTag
+                        env.WEB_EXISTS   = webExists ? 'true' : 'false'
+                        env.NGINX_EXISTS = nginxExists ? 'true' : 'false'
+                        echo "web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
+                    }
+                    stash name: 'source', includes: '**'
+                }
+            }
+        }
+
+        stage('Test') {
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: python
+    image: python:3.12-slim
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+    env:
+      - name: DB_HOST
+        value: "localhost"
+      - name: DB_PORT
+        value: "5432"
+      - name: DB_NAME
+        value: "test_campuscart_db"
+      - name: DB_USER
+        value: "test_user"
+      - name: DB_PASSWORD
+        value: "test_pass"
+      - name: REDIS_HOST
+        value: "localhost"
+      - name: REDIS_PORT
+        value: "6379"
+      - name: DJANGO_SECRET_KEY
+        value: "ci-test-only-not-a-real-secret-00000000"
+      - name: DEBUG
+        value: "True"
+      - name: ALLOWED_HOSTS
+        value: "localhost,127.0.0.1"
+
+  - name: postgres
+    image: postgres:15-alpine
+    env:
+      - name: POSTGRES_DB
+        value: "test_campuscart_db"
+      - name: POSTGRES_USER
+        value: "test_user"
+      - name: POSTGRES_PASSWORD
+        value: "test_pass"
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+
+  - name: redis
+    image: redis:7-alpine
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+'''
+                }
+            }
+            steps {
+                container('python') {
+                    unstash 'source'
+                    sh '''
+                        apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
+                        until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
+                        until nc -z localhost 6379; do echo "Waiting for Redis..."; sleep 2; done
+                        echo "Postgres and Redis are ready."
+                    '''
+
+                    sh '''
+                        cd campuscart-backend
+                        pip install --no-cache-dir -r requirements.txt
+                    '''
+
+                    sh '''
+                        cd campuscart-backend
+                        python manage.py test --noinput --verbosity=2
+                    '''
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: python
+    image: python:3.12-slim
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+'''
+                }
+            }
+            steps {
+                container('python') {
+                    unstash 'source'
+                    sh '''
+                        pip install --no-cache-dir -q pip-audit bandit
+                        cd campuscart-backend
+                        bandit -r . -q -ll
+                        pip-audit -r requirements.txt --no-deps --disable-pip
+                    '''
+                }
+            }
+        }
+
+        stage('Build and Push Images') {
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: kaniko-web
+    image: gcr.io/kaniko-project/executor:debug
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+  - name: kaniko-nginx
+    image: gcr.io/kaniko-project/executor:debug
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+'''
+                }
+            }
+            steps {
+                container('kaniko-web') {
+                    unstash 'source'
+                    sh '''
+                        if [ "${WEB_EXISTS}" = "true" ]; then echo "web image ${WEB_TAG} is already in the registry, skipping its build"; exit 0; fi
+                        /kaniko/executor \
+                          --context=dir://$(pwd)/campuscart-backend \
+                          --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
+                          --destination=192.168.1.3:5000/campuscart-web:${WEB_TAG} \
+                          --destination=192.168.1.3:5000/campuscart-web:latest \
+                          --insecure \
+                          --insecure-pull \
+                          --cache=true
+                    '''
+                }
+
+                container('kaniko-nginx') {
+                    unstash 'source'
+                    sh '''
+                        if [ "${NGINX_EXISTS}" = "true" ]; then echo "nginx image ${NGINX_TAG} is already in the registry, skipping its build"; exit 0; fi
+                        /kaniko/executor \
+                          --context=dir://$(pwd) \
+                          --dockerfile=$(pwd)/nginx/Dockerfile \
+                          --destination=192.168.1.3:5000/campuscart-nginx:${NGINX_TAG} \
+                          --destination=192.168.1.3:5000/campuscart-nginx:latest \
+                          --insecure \
+                          --insecure-pull \
+                          --cache=true
+                    '''
+                }
+            }
+        }
+
+        // The only "deploy" step left: record the new tags in the config repo.
+        // No cluster credentials are used anywhere in this pipeline.
+        stage('Update Config Repo') {
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: git
+    image: alpine/git:latest
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+'''
+                }
+            }
+            steps {
+                container('git') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'config-repo-write-key', keyFileVariable: 'SSH_KEY')]) {
+                        sh '''
+                            set -e
+                            [ -n "${WEB_TAG}" ] && [ -n "${NGINX_TAG}" ] || { echo "WEB_TAG or NGINX_TAG is empty, refusing to update the config repo"; exit 1; }
+
+                            export GIT_SSH_COMMAND="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts"
+                            git config --global user.name "jenkins-ci"
+                            git config --global user.email "jenkins-ci@campuscart.local"
+
+                            rm -rf /tmp/config
+                            git clone --branch "${CONFIG_BRANCH}" git@github.com:bharathMoger18/campuscart-config.git /tmp/config
+                            cd /tmp/config
+
+                            F=overlays/production/kustomization.yaml
+                            sed -i "/campuscart-web/{n;s/newTag: .*/newTag: ${WEB_TAG}/;}" ${F}
+                            sed -i "/campuscart-nginx/{n;s/newTag: .*/newTag: ${NGINX_TAG}/;}" ${F}
+
+                            grep -A1 "campuscart-web" ${F} | grep -q "newTag: ${WEB_TAG}" || { echo "web tag edit did not apply"; exit 1; }
+                            grep -A1 "campuscart-nginx" ${F} | grep -q "newTag: ${NGINX_TAG}" || { echo "nginx tag edit did not apply"; exit 1; }
+
+                            if git diff --quiet; then
+                                echo "Config repo (${CONFIG_BRANCH}) already points at web ${WEB_TAG} / nginx ${NGINX_TAG}: nothing to commit"
+                                exit 0
+                            fi
+
+                            git diff
+                            git add ${F}
+                            git commit -m "ci: deploy web ${WEB_TAG}, nginx ${NGINX_TAG} (Jenkins build #${BUILD_NUMBER})"
+
+                            pushed=false
+                            for attempt in 1 2 3; do
+                                if git push origin "HEAD:${CONFIG_BRANCH}"; then pushed=true; break; fi
+                                echo "push rejected (attempt ${attempt}), rebasing and retrying"
+                                git pull --rebase origin "${CONFIG_BRANCH}"
+                            done
+                            [ "${pushed}" = "true" ] || { echo "could not push after 3 attempts"; exit 1; }
+                            echo "Config repo updated; Argo CD will roll it out if ${CONFIG_BRANCH} is the branch it watches."
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                try {
+                    timeout(time: 3, unit: 'MINUTES') {
+                        podTemplate(yaml: '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: curl
+    image: alpine/k8s:1.29.15
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+''') {
+                            node(POD_LABEL) {
+                                container('curl') {
+                                    withCredentials([string(credentialsId: 'notify-webhook', variable: 'HOOK')]) {
+                                        sh '''
+                                            MSG="CampusCart (gitops) build #${BUILD_NUMBER} FAILED: ${BUILD_URL}"
+                                            printf '{"text":"%s"}' "$MSG" > /tmp/payload.json
+                                            curl -fsS -X POST -H 'Content-Type: application/json' --data @/tmp/payload.json "$HOOK"
+                                        '''
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    echo "Failure notification skipped: ${err.message}"
+                }
+            }
+        }
+    }
+}
