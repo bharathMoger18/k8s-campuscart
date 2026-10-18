@@ -1,3 +1,4 @@
+
 pipeline {
     agent none
 
@@ -20,6 +21,11 @@ spec:
       image: alpine/git:latest
       command: ["cat"]
       tty: true
+
+    - name: aws-cli
+      image: amazon/aws-cli:2.17.0
+      command: ["cat"]
+      tty: true
 '''
                 }
             }
@@ -27,15 +33,213 @@ spec:
                 container('git') {
                     checkout scm
 
+                    sh 'git config --global --add safe.directory "$(pwd)"'
+
                     script {
-                        sh 'git config --global --add safe.directory "$(pwd)"'
-                        env.IMAGE_TAG = sh(
-                            script: 'git rev-parse --short HEAD',
+                        def head = sh(
+                            script: 'git rev-parse HEAD | cut -c1-7',
                             returnStdout: true
                         ).trim()
-                    }
 
-                    stash name: 'source', includes: '**'
+                        def webTag = sh(
+                            script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7',
+                            returnStdout: true
+                        ).trim() ?: head
+
+                        def nginxTag = sh(
+                            script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7',
+                            returnStdout: true
+                        ).trim() ?: head
+
+                        env.WEB_TAG = webTag
+                        env.NGINX_TAG = nginxTag
+                    }
+                }
+
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-campuscart-ci'
+                ]]) {
+                    container('aws-cli') {
+                        script {
+                            def webStatus = sh(
+                                script: '''
+                                    aws ecr describe-images \
+                                      --region "$AWS_REGION" \
+                                      --repository-name campuscart-backend \
+                                      --image-ids imageTag="$WEB_TAG" \
+                                      >/dev/null 2>&1
+                                ''',
+                                returnStatus: true
+                            )
+
+                            def nginxStatus = sh(
+                                script: '''
+                                    aws ecr describe-images \
+                                      --region "$AWS_REGION" \
+                                      --repository-name campuscart-nginx \
+                                      --image-ids imageTag="$NGINX_TAG" \
+                                      >/dev/null 2>&1
+                                ''',
+                                returnStatus: true
+                            )
+
+                            env.WEB_EXISTS = webStatus == 0 ? 'true' : 'false'
+                            env.NGINX_EXISTS = nginxStatus == 0 ? 'true' : 'false'
+
+                            echo "Backend tag ${env.WEB_TAG} (already in ECR: ${env.WEB_EXISTS})"
+                            echo "Nginx tag ${env.NGINX_TAG} (already in ECR: ${env.NGINX_EXISTS})"
+                        }
+                    }
+                }
+
+                stash name: 'source', includes: '**'
+            }
+        }
+
+        stage('Test') {
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: python
+      image: python:3.12-slim
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      env:
+        - name: DB_HOST
+          value: "localhost"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "test_campuscart_db"
+        - name: DB_USER
+          value: "test_user"
+        - name: DB_PASSWORD
+          value: "test_pass"
+        - name: REDIS_HOST
+          value: "localhost"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: DJANGO_SECRET_KEY
+          value: "ci-test-only-not-a-real-secret-00000000"
+        - name: DEBUG
+          value: "True"
+        - name: ALLOWED_HOSTS
+          value: "localhost,127.0.0.1"
+
+    - name: postgres
+      image: postgres:15-alpine
+      env:
+        - name: POSTGRES_DB
+          value: "test_campuscart_db"
+        - name: POSTGRES_USER
+          value: "test_user"
+        - name: POSTGRES_PASSWORD
+          value: "test_pass"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+
+    - name: redis
+      image: redis:7-alpine
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+'''
+                }
+            }
+            steps {
+                container('python') {
+                    unstash 'source'
+
+                    sh '''
+                        apt-get update -qq
+                        apt-get install -y -qq netcat-openbsd > /dev/null
+
+                        until nc -z localhost 5432; do
+                            echo "Waiting for Postgres..."
+                            sleep 2
+                        done
+
+                        until nc -z localhost 6379; do
+                            echo "Waiting for Redis..."
+                            sleep 2
+                        done
+
+                        echo "Postgres and Redis are ready."
+                    '''
+
+                    sh '''
+                        cd campuscart-backend
+                        pip install --no-cache-dir -r requirements.txt
+                    '''
+
+                    sh '''
+                        cd campuscart-backend
+                        python manage.py test --noinput --verbosity=2
+                    '''
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: python
+      image: python:3.12-slim
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+'''
+                }
+            }
+            steps {
+                container('python') {
+                    unstash 'source'
+
+                    sh '''
+                        pip install --no-cache-dir -q pip-audit bandit
+
+                        cd campuscart-backend
+
+                        # Fail on MEDIUM severity and above.
+                        bandit -r . -q -ll
+
+                        # Fail on known vulnerabilities in pinned requirements.
+                        pip-audit -r requirements.txt --no-deps --disable-pip
+                    '''
                 }
             }
         }
@@ -71,7 +275,7 @@ spec:
                     }
 
                     stash name: 'tfplan',
-                          includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
+                        includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
                 }
             }
         }
@@ -170,7 +374,8 @@ spec:
                                 returnStdout: true
                             ).trim()
 
-                            env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+                            env.ECR_REGISTRY =
+                                "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
                         }
                     }
                 }
@@ -178,6 +383,12 @@ spec:
         }
 
         stage('Build and Push Images') {
+            when {
+                beforeAgent true
+                expression {
+                    env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true'
+                }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -220,10 +431,15 @@ spec:
                         unstash 'source'
 
                         sh '''
+                            if [ "$WEB_EXISTS" = "true" ]; then
+                                echo "Backend image ${WEB_TAG} already exists; skipping build."
+                                exit 0
+                            fi
+
                             /kaniko/executor \
                               --context=dir://$(pwd)/campuscart-backend \
                               --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-backend:${IMAGE_TAG} \
+                              --destination=${ECR_REGISTRY}/campuscart-backend:${WEB_TAG} \
                               --cache=true
                         '''
                     }
@@ -232,10 +448,15 @@ spec:
                         unstash 'source'
 
                         sh '''
+                            if [ "$NGINX_EXISTS" = "true" ]; then
+                                echo "Nginx image ${NGINX_TAG} already exists; skipping build."
+                                exit 0
+                            fi
+
                             /kaniko/executor \
                               --context=dir://$(pwd) \
                               --dockerfile=$(pwd)/nginx/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-nginx:${IMAGE_TAG} \
+                              --destination=${ECR_REGISTRY}/campuscart-nginx:${NGINX_TAG} \
                               --cache=true
                         '''
                     }
@@ -281,12 +502,12 @@ spec:
                                 ).trim()
 
                                 env.ECR_BACKEND_IMAGE = sh(
-                                    script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-backend\"'",
+                                    script: """terraform output -json ecr_repository_urls | jq -r '.["campuscart-backend"]'""",
                                     returnStdout: true
                                 ).trim()
 
                                 env.ECR_NGINX_IMAGE = sh(
-                                    script: "terraform output -json ecr_repository_urls | jq -r '.\"campuscart-nginx\"'",
+                                    script: """terraform output -json ecr_repository_urls | jq -r '.["campuscart-nginx"]'""",
                                     returnStdout: true
                                 ).trim()
                             }
@@ -297,8 +518,25 @@ spec:
                         mkdir -p rendered
 
                         for f in k8s-aws/*.yaml; do
-                            envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG}' \
-                                < "$f" > "rendered/$(basename "$f")"
+                            filename=$(basename "$f")
+
+                            case "$filename" in
+                                nginx-deployment.yaml)
+                                    IMAGE_TAG="$NGINX_TAG" \
+                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
+                                      < "$f" > "rendered/$filename"
+                                    ;;
+                                backend-deployment.yaml|migrate-job.yaml)
+                                    IMAGE_TAG="$WEB_TAG" \
+                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
+                                      < "$f" > "rendered/$filename"
+                                    ;;
+                                *)
+                                    IMAGE_TAG="$WEB_TAG" \
+                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
+                                      < "$f" > "rendered/$filename"
+                                    ;;
+                            esac
                         done
                     '''
 
@@ -332,8 +570,8 @@ spec:
                     ]]) {
                         sh '''
                             aws eks update-kubeconfig \
-                                --name ${CLUSTER_NAME} \
-                                --region ${AWS_REGION}
+                              --name "$CLUSTER_NAME" \
+                              --region "$AWS_REGION"
                         '''
 
                         sh '''
@@ -352,12 +590,12 @@ spec:
 
                         sh '''
                             kubectl rollout status deployment/campuscart-backend \
-                                -n campuscart \
-                                --timeout=180s
+                              -n campuscart \
+                              --timeout=180s
 
                             kubectl rollout status deployment/campuscart-nginx \
-                                -n campuscart \
-                                --timeout=120s
+                              -n campuscart \
+                              --timeout=120s
                         '''
                     }
                 }
@@ -367,11 +605,57 @@ spec:
 
     post {
         success {
-            echo "Deployed ${env.IMAGE_TAG} to EKS successfully."
+            echo "Deployed backend ${env.WEB_TAG} and nginx ${env.NGINX_TAG} to EKS successfully."
         }
 
         failure {
-            echo "Pipeline failed — check the stage logs above. Infrastructure changes, if any were applied, are NOT automatically rolled back."
+            echo "CampusCart AWS build #${env.BUILD_NUMBER} FAILED: ${env.BUILD_URL}"
+
+            script {
+                try {
+                    timeout(time: 3, unit: 'MINUTES') {
+                        podTemplate(yaml: '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: curl
+      image: alpine/k8s:1.29.15
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+''') {
+                            node(POD_LABEL) {
+                                container('curl') {
+                                    withCredentials([
+                                        string(
+                                            credentialsId: 'notify-webhook',
+                                            variable: 'HOOK'
+                                        )
+                                    ]) {
+                                        sh '''
+                                            MSG="CampusCart AWS build #${BUILD_NUMBER} FAILED: ${BUILD_URL}"
+                                            printf '{"text":"%s"}' "$MSG" > /tmp/payload.json
+                                            curl -fsS -X POST \
+                                              -H 'Content-Type: application/json' \
+                                              --data @/tmp/payload.json \
+                                              "$HOOK"
+                                        '''
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    echo "Failure notification skipped: ${err.message}"
+                }
+            }
         }
     }
 }
