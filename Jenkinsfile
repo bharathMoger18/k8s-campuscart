@@ -1,13 +1,4 @@
-// Jenkinsfile
-// Lives at the ROOT of the k8s-campuscart repo. This is "pipeline as code" —
-// the pipeline's behavior is versioned, reviewable, and travels with the app,
-// not configured by clicking around in Jenkins' UI.
-
 pipeline {
-    // No top-level 'agent' here — each STAGE defines its own pod, since
-    // different stages need very different containers (test needs
-    // Postgres/Redis; build needs Kaniko; deploy needs kubectl). Sharing
-    // one giant pod for everything would waste resources on every build.
     agent none
 
     stages {
@@ -30,28 +21,12 @@ spec:
             steps {
                 container('git') {
                     checkout scm
-                    // Capture the commit SHA HERE, in the one stage that
-                    // actually has git available. Later stages (Kaniko,
-                    // deploy) don't have git installed at all — they're
-                    // minimal, purpose-built images, not general Linux
-                    // boxes. env.X set here persists for the WHOLE pipeline
-                    // run (it lives in Jenkins' build context, not inside
-                    // any one pod), so every later stage can just read
-                    // env.WEB_TAG and env.NGINX_TAG directly, no matter which pod it's in.
                     script {
                         sh 'git config --global --add safe.directory "$(pwd)"'
-                        // Tag each image by the LAST COMMIT THAT TOUCHED ITS INPUTS, not by the
-                        // current commit. A commit that only edits a manifest or the Jenkinsfile
-                        // then gives the same tag as before, so the image build can be skipped.
-                        //   web   is built from campuscart-backend/
-                        //   nginx is built from nginx/, frontend/ and the root .dockerignore
                         def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
                         def webTag   = sh(script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7', returnStdout: true).trim() ?: head
                         def nginxTag = sh(script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7', returnStdout: true).trim() ?: head
 
-                        // Ask the registry whether that tag already exists (a HEAD request for the
-                        // manifest; BusyBox wget --spider exits non-zero on a 404). On any error the
-                        // tag counts as missing, which only means we build (the safe default).
                         def accept = 'application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json'
                         def webExists   = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-web/manifests/${webTag}", returnStatus: true) == 0
                         def nginxExists = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-nginx/manifests/${nginxTag}", returnStatus: true) == 0
@@ -62,11 +37,6 @@ spec:
                         env.NGINX_EXISTS = nginxExists ? 'true' : 'false'
                         echo "web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
                     }
-                    // Stash the checked-out code so LATER stages (which run
-                    // in COMPLETELY DIFFERENT pods) can retrieve it. Each
-                    // stage's pod is created fresh and torn down after —
-                    // nothing carries over between them automatically except
-                    // what we explicitly stash/unstash.
                     stash name: 'source', includes: '**'
                 }
             }
@@ -74,8 +44,6 @@ spec:
 
         stage('Test') {
             when {
-                // Same condition as the Security Scan: tests run only when the web image
-                // is about to be rebuilt, so manifest-only commits stay fast.
                 beforeAgent true
                 expression { env.WEB_EXISTS != 'true' }
             }
@@ -86,14 +54,6 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-
-  # This is the container our pipeline steps actually execute inside.
-  # WHY "command: cat" + "tty: true": a plain python:3.12-slim image's
-  # default process isn't designed to just sit there waiting for commands —
-  # Jenkins needs this container to stay alive indefinitely so it can
-  # `kubectl exec` into it once per pipeline step. `cat` with a tty attached
-  # is the standard, well-known trick for this: a trivial, harmless process
-  # that never exits on its own.
   - name: python
     image: python:3.12-slim
     command: ["cat"]
@@ -106,9 +66,6 @@ spec:
         cpu: "1"
         memory: "1Gi"
     env:
-      # TEST-ONLY, throwaway values scoped to an ephemeral pod destroyed
-      # the moment this stage ends — not the same risk category as a real
-      # production secret.
       - name: DB_HOST
         value: "localhost"
       - name: DB_PORT
@@ -156,10 +113,6 @@ spec:
             steps {
                 container('python') {
                     unstash 'source'
-
-                    // A pod's containers all START roughly in parallel —
-                    // "Running" does NOT mean "ready to accept connections."
-                    // Same principle as entrypoint.sh's wait-for-postgres logic.
                     sh '''
                         apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null
                         until nc -z localhost 5432; do echo "Waiting for Postgres..."; sleep 2; done
@@ -181,10 +134,6 @@ spec:
         }
 
         stage('Security Scan') {
-            // Runs only when the web image is about to be built. It runs BEFORE
-            // the build (not alongside it) on purpose: if the scan fails, no image
-            // reaches the registry, so retrying the same commit cannot skip both
-            // the scan and the build because the tag already exists.
             when {
                 beforeAgent true
                 expression { env.WEB_EXISTS != 'true' }
@@ -228,8 +177,6 @@ spec:
 
         stage('Build and Push Images') {
             when {
-                // beforeAgent: decide BEFORE Jenkins starts the Kaniko pod, so a skipped
-                // stage costs nothing (no pod startup).
                 beforeAgent true
                 expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
             }
@@ -240,18 +187,6 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-  # MUST use the :debug tag, not the minimal distroless production tag.
-  # The distroless Kaniko image has NO shell binary at all — Jenkins'
-  # Kubernetes plugin runs every pipeline step by exec-ing a shell inside
-  # the container, so with zero shell present, every step would fail
-  # instantly.
-  #
-  # TWO SEPARATE containers, one per image, rather than one container
-  # running both builds sequentially. Kaniko is memory-hungry (full
-  # filesystem snapshots after each instruction) — running both builds in
-  # ONE container risks the second build inheriting memory pressure from
-  # the first and getting OOM-killed. Separate containers = separate
-  # memory ceilings.
   - name: kaniko-web
     image: gcr.io/kaniko-project/executor:debug
     command: ["cat"]
@@ -280,9 +215,6 @@ spec:
             steps {
                 container('kaniko-web') {
                     unstash 'source'
-                    // --insecure / --insecure-pull: our registry serves
-                    // plain HTTP, no TLS. A real company's registry would
-                    // have real TLS and these flags simply wouldn't exist.
                     sh '''
                         if [ "${WEB_EXISTS}" = "true" ]; then echo "web image ${WEB_TAG} is already in the registry, skipping its build"; exit 0; fi
                         /kaniko/executor \
@@ -320,10 +252,6 @@ spec:
 apiVersion: v1
 kind: Pod
 spec:
-  # This is the ONLY stage using this ServiceAccount — it's what actually
-  # grants kubectl inside this Pod permission to update Deployments in
-  # k8s-campuscart. Every other stage uses the default jenkins-agent
-  # identity, which CANNOT do this — least privilege applied per-task.
   serviceAccountName: jenkins-deployer
   containers:
   - name: kubectl
@@ -341,20 +269,6 @@ spec:
 '''
                 }
             }
-            // Replace the existing `steps { container('kubectl') { sh '''...''' } }`
-// block inside the Deploy stage with this. Everything below the
-// migration section is your EXISTING code, unchanged — only the top
-// part (Job delete/apply/wait) is new.
-//
-// Note on `kubectl wait --for=condition=complete`: it only matches a
-// Job reaching Complete. If the Job instead FAILS (hits backoffLimit),
-// it gets a Failed condition, which wait does NOT match — so a real
-// failure isn't detected immediately, it just times out after the
-// full --timeout window, then errors (correctly failing the pipeline,
-// just slower than an explicit failure check would be). The `||`
-// block below at least dumps the Job's logs to the Jenkins console
-// when that happens, so a failure is debuggable without needing to
-// kubectl exec/describe by hand afterward.
           steps {
                 container('kubectl') {
                     sh '''
@@ -409,11 +323,7 @@ spec:
             }
         }
     }
-
-    // Failure notification: runs after ANY stage fails. Posts a short message to a chat
-    // webhook whose URL lives in the Jenkins credential 'notify-webhook' (never in git).
-    // A missing credential or a failed POST is logged and swallowed: a broken notifier must
-    // never change the build result or hang the pipeline.
+    
     post {
         failure {
             script {

@@ -12,7 +12,7 @@ A campus e-commerce web app (Django) and the platform I built around it: a self-
 |---|---|---|
 | Where | 3 virtual machines I set up with kubeadm (1 control plane, 2 workers, Kubernetes v1.30) | EKS 1.31, provisioned with Terraform |
 | Manifests | [`k8s/`](k8s) | [`k8s-aws/`](k8s-aws) |
-| Pipeline | [`Jenkinsfile`](Jenkinsfile), 5 stages | [`Jenkinsfile.aws`](Jenkinsfile.aws), 9 stages |
+| Pipeline | [`Jenkinsfile`](Jenkinsfile), 5 stages | [`Jenkinsfile.aws`](Jenkinsfile.aws), 11 stages now (9 as deployed; Test and Security Scan were added after teardown and have never run) |
 | Status | Running | Completed deployment, infrastructure torn down |
 
 ## kubeadm architecture
@@ -78,7 +78,7 @@ I would rather list these than hide them:
 - **A tested restore.** A nightly backup CronJob is configured, but I have not yet practised and documented a restore.
 - **A more resilient database on AWS.** RDS is single-AZ, so it is not highly available.
 - **Redis encryption on AWS.** ElastiCache is a single node without encryption in transit or at rest.
-- **The AWS pipeline** has no test, scan or rollback stage. The kubeadm pipeline has all three.
+- **The AWS pipeline** has no rollback stage. Its Test and Security Scan stages were added after the environment was torn down, so they have never run. The kubeadm pipeline has all three and runs them.
 
 ## The application
 
