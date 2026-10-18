@@ -1,139 +1,110 @@
-# Todo Summary Assistant: DevOps Assessment
+# CampusCart on Kubernetes
 
-A to-do application (Spring Boot backend, React frontend, MySQL) that can summarize pending tasks with Cohere and post the summary to Slack. This repository is the original project plus my DevOps work: Docker, a Jenkins CI/CD pipeline, deployment to AWS EC2 with RDS, and Prometheus/Grafana monitoring.
+A campus e-commerce web app (Django) and the platform I built around it: a self-built 3-node Kubernetes cluster with a Jenkins CI/CD pipeline, plus a second deployment on AWS EKS written in Terraform.
 
-The application features are unchanged. Everything below is about building, running, deploying and operating it.
+**Portfolio:** [portfolio.bharathops.online](https://portfolio.bharathops.online) · **Running app:** [campuscart.bharathops.online](https://campuscart.bharathops.online)
 
-## Documents
+> **About authorship.** I built the CampusCart application with AI coding tools. My own work is the platform around it: Kubernetes, CI/CD, secrets, TLS, monitoring and AWS infrastructure in Terraform. That is what this repository shows.
 
-| File | What it covers |
-|---|---|
-| `aws/aws-setup.md`, `aws/architecture-diagram.png` | AWS layout, security groups, IAM, secrets |
-| `FAILURE_AND_ROLLBACK.md` | The six failure scenarios, with what I tested |
-| `MONITORING_AND_OPERATIONS.md` | Metrics, logs, alerts, early detection |
-| `Jenkinsfile` | The pipeline |
-| `monitoring/` | `prometheus.yml`, `alert-rules.yml`, Grafana dashboard and provisioning |
+## Two environments
 
-## Repository layout
+| | kubeadm cluster | AWS EKS |
+|---|---|---|
+| Where | 3 virtual machines I set up with kubeadm (1 control plane, 2 workers, Kubernetes v1.30) | EKS 1.31, provisioned with Terraform |
+| Manifests | [`k8s/`](k8s) | [`k8s-aws/`](k8s-aws) |
+| Pipeline | [`Jenkinsfile`](Jenkinsfile), 5 stages | [`Jenkinsfile.aws`](Jenkinsfile.aws), 9 stages |
+| Status | Running | Completed deployment, infrastructure torn down |
+
+## kubeadm architecture
+
+```mermaid
+flowchart LR
+    U([Browser]) --> CF[Cloudflare]
+    CF --> T["cloudflared<br/>Tunnel, 2 replicas"]
+    T -->|HTTPS| IN[ingress-nginx]
+    IN -->|"HTTPS, verified<br/>against a private CA"| NG[Nginx]
+    NG --> W["Django on Daphne<br/>2 replicas"]
+    W --> PG[("PostgreSQL<br/>StatefulSet")]
+    W --> R[("Redis")]
+    V["Vault<br/>Agent Injector"] -. "secrets at runtime" .-> W
+    P["Prometheus<br/>ServiceMonitors"] -. "metrics" .-> W
+    P -.-> PG
+    P -.-> R
+    B["Nightly backup<br/>CronJob, 02:00"] --> PG
+```
+
+- **Public access** goes through a Cloudflare Tunnel (`cloudflared`, 2 replicas) that forwards to ingress-nginx.
+- **Internal TLS:** cert-manager issues certificates from a private CA. ingress-nginx verifies the Nginx certificate before it forwards a request.
+- **Secrets:** pods read their database credentials and app secrets from Vault when they start. The web pods get dynamic database credentials and re-read them on each new connection. No secret values are in this repository.
+- **Reliability:** the web Deployment has 2 replicas, a PodDisruptionBudget, and startup, readiness and liveness probes. PostgreSQL runs as a StatefulSet with a nightly backup CronJob.
+- **Monitoring:** ServiceMonitors for the web app, PostgreSQL and Redis feed Prometheus. The Django app exposes its own metrics with django-prometheus.
+
+## CI/CD pipeline (kubeadm)
+
+```mermaid
+flowchart LR
+    A[Checkout] --> B[Test] --> C[Security Scan] --> D["Build and Push<br/>Kaniko"] --> E[Deploy]
+    E --> F["Run migration Job"] --> G["Wait for rollout"]
+    G -->|fails| H["kubectl rollout undo"]
+```
+
+1. **Checkout** tags each image with the short hash of the last commit that touched it, and asks the registry whether that tag already exists.
+2. **Test** runs `manage.py test` against PostgreSQL and Redis containers. It is skipped when the image already exists.
+3. **Security Scan** runs `bandit` and `pip-audit` before anything is built, so a failed scan leaves no image in the registry.
+4. **Build and Push** builds the web and Nginx images with Kaniko, in separate containers, and pushes them to a private registry.
+5. **Deploy** runs the database migration as a Kubernetes Job, applies the manifests, then waits for the rollout. If the new pods do not become ready in time, it runs `kubectl rollout undo`.
+
+Jenkins deploys with its own ServiceAccount. A namespace-scoped Role limits what it may change, and that Role has no rule for Secrets ([`k8s/jenkins-deployer-rbac.yaml`](k8s/jenkins-deployer-rbac.yaml)). A separate pipeline, [`Jenkinsfile.security`](Jenkinsfile.security), runs a dependency audit and a Trivy image scan.
+
+## AWS environment (Terraform)
+
+Infrastructure is split into 7 modules under [`terraform/modules`](terraform/modules): `networking`, `eks`, `rds`, `elasticache`, `ecr`, `iam` and `iam-irsa`.
+
+- Remote state in S3 with native state locking, encryption and versioning.
+- A VPC across 2 Availability Zones with public and private subnets, EKS with a managed node group on Spot instances, RDS PostgreSQL and ElastiCache Redis.
+- The database password is generated by Terraform, stored in AWS Secrets Manager and synced into the cluster by External Secrets Operator.
+- IRSA roles for External Secrets Operator and the AWS Load Balancer Controller. Both are installed with Terraform `helm_release`.
+- An Application Load Balancer with path-based routing (`/api`, `/ws` and `/`) and a HorizontalPodAutoscaler from 2 to 6 replicas.
+- [`Jenkinsfile.aws`](Jenkinsfile.aws) shows the Terraform plan and waits for a manual approval before it applies.
+
+This environment was deployed and has since been torn down. The Terraform and manifests remain as the record of what I built.
+
+## What I would improve next
+
+I would rather list these than hide them:
+
+- **HTTPS on the AWS load balancer.** The ALB listens on HTTP only. The next step is an ACM certificate and an HTTPS listener.
+- **Alerting.** Prometheus collects metrics, but I have not configured alert rules or Alertmanager.
+- **A tested restore.** A nightly backup CronJob is configured, but I have not yet practised and documented a restore.
+- **A more resilient database on AWS.** RDS is single-AZ, so it is not highly available.
+- **Redis encryption on AWS.** ElastiCache is a single node without encryption in transit or at rest.
+- **The AWS pipeline** has no test, scan or rollback stage. The kubeadm pipeline has all three.
+
+## The application
+
+Django 5 with Django REST Framework, JWT authentication, Django Channels and Daphne for WebSockets, Redis, and PostgreSQL. Features: product listings with search, cart and wishlist, orders, Stripe payments, real-time chat, notifications, reviews and a seller dashboard.
 
 ```
-Backend/todo-summary-assistant/   Spring Boot + Maven app, Dockerfile, .dockerignore
-Frontend/todo/                    React app, Dockerfile, .dockerignore, nginx.conf.template
-Jenkinsfile                       CI/CD pipeline
-docker-compose.yml                local run: MySQL + backend + frontend
-docker-compose.prod.yml           production stack on EC2 (no MySQL, RDS is used)
-aws/                              deploy.sh, setup.sh, aws-setup.md, architecture diagram
-monitoring/                       Prometheus, alert rules, Grafana, compose file for the ops host
-.env.example                      environment variables
+campuscart-backend/   Django apps: users, products, cart, wishlist, orders,
+                      payments, chat, push, reviews
+frontend/             static HTML, CSS and JavaScript
+nginx/                Nginx image and config
+k8s/                  kubeadm manifests
+k8s-aws/              AWS EKS manifests
+terraform/            AWS infrastructure (7 modules)
+monitoring/           Prometheus values
+Jenkinsfile*          CI/CD pipelines
 ```
 
-I used a `Jenkinsfile` in the repo root instead of `.github/workflows/ci-cd.yml`. `docker-compose.prod.yml`, `monitoring/docker-compose.yml` and `aws/deploy.sh` are extra files beyond the suggested layout.
-
-## 1. Run locally
-
-**Requirements:** Docker with Compose v2. Nothing else is needed, because the images build the app themselves.
+## Run it locally
 
 ```bash
-cp .env.example .env
-# edit .env: set DB_PASSWORD to any password you like
+cp .env.example .env     # fill in your own values
 docker compose up --build
 ```
 
-Open http://localhost:3000. The first start takes a few minutes while images build. MySQL runs in a container with a named volume, the backend creates the `todo` table on startup (`ddl-auto=update`), and the frontend container proxies `/api` to the backend.
+[`docker-compose.yml`](docker-compose.yml) defines the web app, PostgreSQL, Redis and Nginx. Real secrets belong in `.env`, which Git ignores.
 
-`COHERE_API_KEY` and `SLACK_WEBHOOK_URL` default to dummy values for local runs. Creating, editing, completing and deleting to-dos works without them. The "summarize and send to Slack" feature needs real values, and **I did not use real ones: the keys in my deployment are placeholders**, so I did not test that feature end to end.
+## Contact
 
-### Environment variables
-
-| Variable | Used by | Purpose |
-|---|---|---|
-| `DB_PASSWORD` | local compose | MySQL root password (required locally) |
-| `DB_NAME` | local compose | Database name, default `todo_db` |
-| `COHERE_API_KEY` | backend | Cohere API key |
-| `SLACK_WEBHOOK_URL` | backend | Slack incoming webhook |
-| `FRONTEND_PORT` | local compose | Host port for the UI, default 3000 |
-| `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | backend | JDBC settings. In production the compose file builds them from the values below. |
-| `BACKEND_HOST`, `BACKEND_PORT`, `DNS_RESOLVER` | frontend (nginx) | Where nginx proxies `/api` |
-| `DB_HOST`, `DB_USERNAME`, `DB_PASSWORD` | production compose | RDS endpoint and credentials, filled from SSM by `deploy.sh` |
-| `ECR_REGISTRY`, `IMAGE_TAG`, `METRICS_BIND_IP` | production compose | Registry, image tag, and the host's private IP for the metrics ports |
-
-### Assumptions
-
-- MySQL 8.x is the database, matching RDS MySQL 8.4.
-- The backend listens on 8080 inside its container and is not published on the host locally. The frontend is the only entry point.
-- The existing CORS setting in `application.properties` is unchanged.
-
-## 2. Changes to application code (DevOps enablement only)
-
-No business logic was changed. The changes are:
-
-- `Backend/.../application.properties`: database URL, username and password, the Cohere key and the Slack webhook now come from environment variables, so no real values are committed. Actuator now exposes only `health` and `prometheus`, with an `application` tag on metrics.
-- `Backend/.../pom.xml`: <<CONFIRM: list what the 8 added lines are, for example "added spring-boot-starter-actuator and micrometer-registry-prometheus">>
-- `Frontend/todo/src/services/todoService.js` and `Frontend/todo/package.json`: <<CONFIRM: describe the 4-line change and the 1-line change, run the command in my notes>>
-
-## 3. Docker design
-
-**Backend** (`Backend/todo-summary-assistant/Dockerfile`)
-- Multi-stage: `maven:3.9.9-eclipse-temurin-17` builds the jar, then only the jar is copied into `eclipse-temurin:17-jre-alpine`, which keeps the final image small.
-- `pom.xml` is copied and dependencies are downloaded before the source is copied, so dependency layers are cached between builds.
-- Runs as a non-root user (`app`).
-- `HEALTHCHECK` calls `/actuator/health`. Compose and the deploy script use it.
-- `-XX:MaxRAMPercentage=75.0` makes the JVM respect the container's memory limit.
-- Installs the patched `zlib` package in the runtime stage.
-
-**Frontend** (`Frontend/todo/Dockerfile`)
-- Multi-stage: `node:20-alpine` runs `npm ci` and `npm run build`, then the static files are served by `nginxinc/nginx-unprivileged:1.30-alpine`.
-- The nginx image is the unprivileged variant, so it runs as non-root and listens on 8080.
-- `nginx.conf.template` proxies `/api` to `BACKEND_HOST:BACKEND_PORT` and serves `/healthz`, so the same image works locally and on EC2 without a rebuild.
-- `HEALTHCHECK` calls `/healthz`.
-
-Both services have a `.dockerignore`. All configuration comes from environment variables, and no secrets are baked into images.
-
-## 4. CI/CD pipeline (`Jenkinsfile`)
-
-Jenkins runs on the `todo-ops` EC2 instance as a multibranch pipeline. The Prepare, test and build stages run on every branch. Push, deploy and verify run only on `main`.
-
-| Stage | What it does |
-|---|---|
-| Prepare | Tags the build with the 8-character commit SHA, checks `APP_HOST` is set, and reads the AWS account ID. |
-| Backend tests | Starts a throwaway MySQL 8.4 container with a random password, runs `mvn test` against it, then removes it. The only test in the project is a Spring context test. There are no frontend tests, so none run. |
-| Build images | Builds the backend and frontend images tagged `<ECR>/todo-backend:<sha>` and `todo-frontend:<sha>`. |
-| Push to ECR | Logs in with the instance role and pushes both images. Skips a push if the tag already exists, because tags are immutable. |
-| Deploy to EC2 | Copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host over SSH and runs `deploy.sh <tag>`. The script reads secrets from SSM, starts the stack, waits for health, and rolls back to the previous tag if the new one is not healthy. |
-| Verify deployment | Calls `/healthz` and `/api/todos` through port 80 and checks that the running tag equals the built tag. |
-
-Other behavior: the pipeline stops at the first failing stage, one build runs at a time, there is a 45-minute timeout, and only the last 10 builds are kept. Secrets are never in the repo. The SSH key is a Jenkins credential (`app-ssh`), and AWS access comes from the instance role.
-
-**Trigger:** <<CONFIRM: after setting Scan Repository Triggers, write "Jenkins checks the repository every minute and builds new commits automatically. It polls because its port is open only to my IP, so GitHub webhooks cannot reach it.">>
-
-**Jenkins setup needed to reproduce:** Jenkins with Docker, the AWS CLI, Git and Java on a host that has an ECR push role; credentials `app-ssh` (SSH key for the app host) and `github-read`; and a global environment variable `APP_HOST` with the app host's address.
-
-## 5. AWS deployment
-
-See `aws/aws-setup.md` and `aws/architecture-diagram.png`. Short version: `todo-app` (EC2 t3.small) runs the app containers, `todo-ops` (EC2 t3.medium) runs Jenkins, Prometheus and Grafana, and `todo-db` is an RDS MySQL instance that accepts connections only from the app security group. Instance roles are used instead of access keys, and database credentials and API keys are in SSM Parameter Store under `/todo/*`.
-
-## 6. Monitoring
-
-Prometheus and Grafana run in containers on `todo-ops`. To start them, copy each `monitoring/targets/*.json.example` file to a file without `.example` and fill in the app host's private IP, then run `docker compose -f monitoring/docker-compose.yml up -d`. The datasource and dashboard are provisioned from `monitoring/grafana/`. `monitoring/grafana-dashboard.json` is a copy of the dashboard for review.
-
-Four alert rules are in `monitoring/alert-rules.yml`: service down, high 5xx rate, high CPU and low disk. Details are in `MONITORING_AND_OPERATIONS.md`.
-
-## 7. Failure and rollback
-
-Written up in `FAILURE_AND_ROLLBACK.md`. I tested the automatic rollback by deploying a deliberately broken version: the health check failed, the previous version was restored, and the build ended red. The whole site was down for about 5 minutes 45 seconds during that test.
-
-## Known limitations
-
-- **Grafana has no notification channel.** Alerts fire but nobody is notified.
-- **Cohere key and Slack webhook are placeholders**, so the summary feature was not tested with real services.
-- **HTTP only.** There is no TLS on the app, Grafana or Jenkins.
-- **RDS is single-AZ** with 3-day backups and no deletion protection, to keep cost low.
-- **The infrastructure was created by hand** (console and CLI). `aws/setup.sh` only contains the monitoring security-group rules, and there is no Terraform.
-- **Not done:** root access key check and deactivation, and a monthly budget alert.
-- **The existing React dependencies report 106 vulnerabilities** (4 critical) in `npm ci`. I did not change the application's dependencies.
-- Jenkins logs `Could not update commit status` (403) because my GitHub token cannot write commit statuses. The builds are not affected.
-- The deploy script waits its full 200 seconds before rolling back, even if Compose has already marked the backend unhealthy. Rollback could start about 3 minutes earlier.
-
-## Cleaning up
-
-When the review is finished, stop or delete both EC2 instances and the RDS instance to avoid charges.
+Bharath Moger · Bengaluru · [bharath.m.moger@gmail.com](mailto:bharath.m.moger@gmail.com) · [LinkedIn](https://www.linkedin.com/in/bharathmoger) · [GitHub](https://github.com/bharathMoger18)
