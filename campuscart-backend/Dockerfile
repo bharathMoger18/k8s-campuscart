@@ -38,7 +38,7 @@ COPY requirements.txt .
 ## rather than the system site-packages. This makes the NEXT stage's
 ## job trivial — copy one folder, get every dependency, with nothing
 ## else from the builder (no compiler, no apt cache, no source tarballs).
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --timeout 1200 --retries 5 --prefix=/install -r requirements.txt
 
 
 ## =====================================================================
