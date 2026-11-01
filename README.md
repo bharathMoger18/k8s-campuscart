@@ -105,6 +105,10 @@ docker compose up --build
 
 [`docker-compose.yml`](docker-compose.yml) defines the web app, PostgreSQL, Redis and Nginx. Real secrets belong in `.env`, which Git ignores.
 
+## Work tracking
+
+Planned and completed work for this project is tracked in a Jira space with the key CC. Commits and branches that include a key such as `CC-59` show up on the matching work item. The existing work items were written up afterwards from finished work, so the real history of this project is in Git.
+
 ## Contact
 
 Bharath Moger · Bengaluru · [bharath.m.moger@gmail.com](mailto:bharath.m.moger@gmail.com) · [LinkedIn](https://www.linkedin.com/in/bharathmoger) · [GitHub](https://github.com/bharathMoger18)
