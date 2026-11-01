@@ -122,7 +122,7 @@ spec:
 
                     sh '''
                         cd campuscart-backend
-                        pip install --no-cache-dir -r requirements.txt
+                        python -m pip install --no-cache-dir --timeout 120 --retries 5 -r requirements.txt
                     '''
 
                     sh '''
