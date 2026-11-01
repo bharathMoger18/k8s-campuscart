@@ -171,7 +171,7 @@ spec:
                         # Low findings (fixture passwords in tests, two try/except/pass).
                         bandit -r . -q -ll
                         # pip-audit: fail on ANY known vulnerability in the pinned versions.
-                        pip-audit -r requirements.txt --no-deps --disable-pip
+                        pip-audit --timeout 120 -r requirements.txt --no-deps --disable-pip
                     '''
                 }
             }
