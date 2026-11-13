@@ -8,6 +8,7 @@ from django.http import FileResponse, Http404, HttpResponse
 from push.views import service_worker
 from products.views import product_redirect_view
 import os
+from .health import readyz
 
 FRONTEND_DIR = os.path.join(settings.BASE_DIR, 'frontend')
 
@@ -36,6 +37,7 @@ async def healthz(request):
 
 urlpatterns = [
     path("healthz", healthz, name="healthz"),
+    path("api/v1/readyz", readyz, name="readyz"),
     path("admin/", admin.site.urls),
     path("products/<int:pk>/", product_redirect_view, name="product-view"),
     path("api/v1/", include(("campuscart.api_urls", "api"), namespace="v1")),
