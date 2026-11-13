@@ -1,6 +1,24 @@
 pipeline {
     agent none
 
+    options {
+        // Only one build at a time, so two builds can never run the migrate Job or rollouts together.
+        // Newer builds wait in the queue. Deliberately NOT using abortPrevious: aborting a build
+        // halfway through a deploy is worse than waiting.
+        disableConcurrentBuilds()
+        // Safety net so a hung build cannot block the queue forever.
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    environment {
+        // Smoke test target: the nginx Service on 443 (pod port 8443), the same TLS path the ingress uses.
+        // The test runs curl with -k because the backend cert is not issued for the in-cluster service name.
+        // /api/v1/ is the nginx location that proxies to Django (location / only serves static frontend files).
+        SMOKE_URL  = 'https://nginx.k8s-campuscart.svc.cluster.local/api/v1/readyz'
+        // Must be in Django ALLOWED_HOSTS, otherwise Django answers 400 DisallowedHost.
+        SMOKE_HOST = 'campuscart.bharathops.online'
+    }
+
     stages {
 
         stage('Checkout') {
@@ -20,9 +38,16 @@ spec:
             }
             steps {
                 container('git') {
-                    checkout scm
                     script {
+                        def scmVars = checkout scm
                         sh 'git config --global --add safe.directory "$(pwd)"'
+
+                        // Branch detection that works for multibranch (BRANCH_NAME) and plain SCM jobs (GIT_BRANCH).
+                        // Change 'main' below if your production branch has a different name.
+                        def branch = env.BRANCH_NAME ?: (scmVars.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+                        env.IS_MAIN = (branch == 'main') ? 'true' : 'false'
+                        echo "branch '${branch}' -> IS_MAIN=${env.IS_MAIN} (only main builds, pushes and deploys)"
+
                         def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
                         def webTag   = sh(script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7', returnStdout: true).trim() ?: head
                         def nginxTag = sh(script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7', returnStdout: true).trim() ?: head
@@ -38,6 +63,8 @@ spec:
                         echo "web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
                     }
                     stash name: 'source', includes: '**'
+                    // Small stash for the Deploy stage: it only needs the manifests.
+                    stash name: 'k8s', includes: 'k8s/**'
                 }
             }
         }
@@ -122,9 +149,9 @@ spec:
 
                     sh '''
                         cd campuscart-backend
-			 export PIP_TIMEOUT=1200
-			 export PIP_RETRIES=5
-			 python -m pip install --no-cache-dir -r requirements.txt
+                        export PIP_TIMEOUT=1200
+                        export PIP_RETRIES=5
+                        python -m pip install --no-cache-dir -r requirements.txt
                     '''
 
                     sh '''
@@ -180,7 +207,8 @@ spec:
         stage('Build and Push Images') {
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+                // main only: feature branches and PRs must never push images (or :latest).
+                expression { env.IS_MAIN == 'true' && (env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true') }
             }
             agent {
                 kubernetes {
@@ -248,6 +276,11 @@ spec:
         }
 
         stage('Deploy') {
+            when {
+                beforeAgent true
+                // main only: no deploy from feature branches or PRs.
+                expression { env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -271,10 +304,26 @@ spec:
 '''
                 }
             }
-          steps {
+            steps {
                 container('kubectl') {
+                    // This pod is fresh, so the manifests must be brought in explicitly.
+                    unstash 'k8s'
                     sh '''
                         [ -n "${WEB_TAG}" ] && [ -n "${NGINX_TAG}" ] || { echo "WEB_TAG or NGINX_TAG is empty, refusing to deploy"; exit 1; }
+                        [ -f k8s/migrate-job.yaml ] && [ -f k8s/web.yaml ] && [ -f k8s/nginx.yaml ] || { echo "k8s manifests missing after unstash, refusing to deploy"; exit 1; }
+
+                        ns="${NS:-k8s-campuscart}"
+
+                        revision_of() {
+                            kubectl get "deployment/$1" -n "${ns}" -o jsonpath='{.metadata.annotations.deployment\\.kubernetes\\.io/revision}' 2>/dev/null || true
+                        }
+
+                        # Remember the current revisions BEFORE applying anything, so a failed smoke
+                        # test only rolls back deployments that this build actually changed.
+                        web_rev_before=$(revision_of web)
+                        nginx_rev_before=$(revision_of nginx)
+                        echo "revisions before deploy: web=${web_rev_before:-none} nginx=${nginx_rev_before:-none}"
+
                         echo "=== Running database migrations ==="
                         kubectl delete job campuscart-migrate -n k8s-campuscart --ignore-not-found
 
@@ -320,12 +369,56 @@ spec:
 
                         rollout_or_rollback web 600s
                         rollout_or_rollback nginx 120s
+
+                        # ---------- Post-deploy smoke test ----------
+                        # Pods being Ready only proves the containers started. This proves the
+                        # request path (nginx -> web -> app) actually answers.
+                        smoke_test() {
+                            url="$1"
+                            attempt=1
+                            while [ "${attempt}" -le 12 ]; do
+                                # Require exactly 200: a 301/302 redirect must NOT count as healthy.
+                                # Also require Django's JSON body, so an nginx fallback page (index.html) cannot pass.
+                                code=$(curl -ksS --max-time 5 -o /tmp/smoke.body -w '%{http_code}' -H "Host: ${SMOKE_HOST}" "${url}" || true)
+                                if [ "${code}" = "200" ] && grep -q '"status": "ok"' /tmp/smoke.body; then
+                                    echo "smoke test passed: ${url} -> ${code}"
+                                    return 0
+                                fi
+                                echo "smoke test attempt ${attempt}/12 got HTTP ${code:-none} from ${url}, retrying in 5s"
+                                attempt=$((attempt + 1))
+                                sleep 5
+                            done
+                            return 1
+                        }
+
+                        rollback_if_changed() {
+                            dep="$1"
+                            before="$2"
+                            now=$(revision_of "${dep}")
+                            if [ -n "${before}" ] && [ "${now}" != "${before}" ]; then
+                                echo "=== ${dep} changed in this build (revision ${before} -> ${now}): rolling back ==="
+                                kubectl rollout undo "deployment/${dep}" -n "${ns}"
+                                kubectl rollout status "deployment/${dep}" -n "${ns}" --timeout=300s || true
+                            else
+                                echo "${dep} was not changed by this build (or had no previous revision): leaving it alone"
+                            fi
+                        }
+
+                        echo "=== Smoke test: ${SMOKE_URL} ==="
+                        if ! smoke_test "${SMOKE_URL}"; then
+                            echo "=== SMOKE TEST FAILED: rolling back what this build changed ==="
+                            rollback_if_changed web "${web_rev_before}"
+                            rollback_if_changed nginx "${nginx_rev_before}"
+                            echo "NOTE: database migrations are NOT rolled back. Make sure they are backward compatible."
+                            exit 1
+                        fi
+                        echo "=== Deploy verified ==="
                     '''
                 }
             }
         }
     }
-    
+
     post {
         failure {
             script {
