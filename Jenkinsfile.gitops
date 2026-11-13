@@ -35,10 +35,10 @@ spec:
                     dir('app-source') {
                         deleteDir()
                         sh 'git init'
+                        sh 'git config --global --add safe.directory "$(pwd)"'
                         sh 'git remote add origin https://github.com/bharathMoger18/k8s-campuscart.git'
                         sh 'git fetch origin main'
                         sh 'git checkout -f FETCH_HEAD'
-                        sh 'git config --global --add safe.directory "$(pwd)"'
 
                         script {
                             def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
