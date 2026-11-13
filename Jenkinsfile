@@ -207,7 +207,7 @@ spec:
         stage('Build and Push Images') {
             when {
                 beforeAgent true
-                // main only: feature branches and PRs must never push images (or :latest).
+                // main only: feature branches and PRs must never push images. Images are tagged by commit only (no :latest).
                 expression { env.IS_MAIN == 'true' && (env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true') }
             }
             agent {
@@ -251,7 +251,6 @@ spec:
                           --context=dir://$(pwd)/campuscart-backend \
                           --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-web:${WEB_TAG} \
-                          --destination=192.168.1.3:5000/campuscart-web:latest \
                           --insecure \
                           --insecure-pull \
                           --cache=true
@@ -266,7 +265,6 @@ spec:
                           --context=dir://$(pwd) \
                           --dockerfile=$(pwd)/nginx/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-nginx:${NGINX_TAG} \
-                          --destination=192.168.1.3:5000/campuscart-nginx:latest \
                           --insecure \
                           --insecure-pull \
                           --cache=true

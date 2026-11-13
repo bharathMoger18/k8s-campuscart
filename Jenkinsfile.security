@@ -2,6 +2,7 @@
 // A SEPARATE Jenkins job (Pipeline script from SCM, script path Jenkinsfile.security) that runs
 // weekly. The per-build Security Scan only runs when the web image is rebuilt, so manifest-only
 // commits and base-image patches slip past it; this job covers both.
+// The image scan reads the images that are ACTUALLY running in the cluster (no :latest).
 pipeline {
     agent none
     triggers {
@@ -50,7 +51,19 @@ spec:
 apiVersion: v1
 kind: Pod
 spec:
+  serviceAccountName: jenkins-deployer
   containers:
+  - name: kubectl
+    image: alpine/k8s:1.29.15
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
   - name: trivy
     image: aquasec/trivy:latest
     command: ["cat"]
@@ -66,12 +79,27 @@ spec:
                 }
             }
             steps {
+                // Step 1: ask the cluster which images are really deployed (web + nginx, one per line).
+                container('kubectl') {
+                    sh '''
+                        kubectl get deployment web nginx -n k8s-campuscart \
+                          -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\\n"}{end}{end}' \
+                          | sort -u > images.txt
+                        echo "Images running in the cluster:"
+                        cat images.txt
+                        [ -s images.txt ] || { echo "no images found in the cluster, refusing to report a clean scan"; exit 1; }
+                    '''
+                }
+                // Step 2: scan each of them. The workspace is shared between the two containers.
                 container('trivy') {
                     sh '''
                         rc=0
-                        trivy image --insecure --ignore-unfixed --severity HIGH,CRITICAL --scanners vuln --exit-code 1 192.168.1.3:5000/campuscart-web:latest || rc=1
-                        trivy image --insecure --ignore-unfixed --severity HIGH,CRITICAL --scanners vuln --exit-code 1 192.168.1.3:5000/campuscart-nginx:latest || rc=1
-                        exit $rc
+                        while read -r img; do
+                            [ -n "${img}" ] || continue
+                            echo "=== scanning ${img} ==="
+                            trivy image --insecure --ignore-unfixed --severity HIGH,CRITICAL --scanners vuln --exit-code 1 "${img}" || rc=1
+                        done < images.txt
+                        exit ${rc}
                     '''
                 }
             }
