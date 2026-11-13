@@ -404,6 +404,19 @@ spec:
 
                         echo "=== Smoke test: ${SMOKE_URL} ==="
                         if ! smoke_test "${SMOKE_URL}"; then
+                            echo "=== SMOKE TEST FAILED: collecting evidence BEFORE rollback ==="
+                            echo "--- 1. what nginx returns for the smoke URL ---"
+                            curl -ksSi --max-time 5 -H "Host: ${SMOKE_HOST}" "${SMOKE_URL}" | head -n 20 || true
+                            echo "--- 2. what the web Service returns directly (bypasses nginx) ---"
+                            curl -sSi --max-time 5 -H "Host: ${SMOKE_HOST}" "http://web.k8s-campuscart.svc.cluster.local:8000/api/v1/readyz" | head -n 20 || true
+                            echo "--- 3. web pods: which image each one runs ---"
+                            kubectl get pods -n "${ns}" -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,READY:.status.containerStatuses[*].ready,NODE:.spec.nodeName || true
+                            echo "--- 4. nginx pods ---"
+                            kubectl get pods -n "${ns}" -l app=nginx -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,READY:.status.containerStatuses[*].ready || true
+                            echo "--- 5. which pods the Services send traffic to ---"
+                            kubectl get endpoints web nginx -n "${ns}" || true
+                            echo "--- 6. web ReplicaSets ---"
+                            kubectl get rs -n "${ns}" -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image,DESIRED:.spec.replicas,READY:.status.readyReplicas || true
                             echo "=== SMOKE TEST FAILED: rolling back what this build changed ==="
                             rollback_if_changed web "${web_rev_before}"
                             rollback_if_changed nginx "${nginx_rev_before}"
