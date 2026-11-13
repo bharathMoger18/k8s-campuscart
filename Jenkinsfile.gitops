@@ -32,24 +32,32 @@ spec:
             }
             steps {
                 container('git') {
-                    checkout scm
-                    script {
+                    dir('app-source') {
+                        deleteDir()
+                        sh 'git init'
+                        sh 'git remote add origin https://github.com/bharathMoger18/k8s-campuscart.git'
+                        sh 'git fetch origin main'
+                        sh 'git checkout -f FETCH_HEAD'
                         sh 'git config --global --add safe.directory "$(pwd)"'
-                        def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
-                        def webTag   = sh(script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7', returnStdout: true).trim() ?: head
-                        def nginxTag = sh(script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7', returnStdout: true).trim() ?: head
 
-                        def accept = 'application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json'
-                        def webExists   = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-web/manifests/${webTag}", returnStatus: true) == 0
-                        def nginxExists = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-nginx/manifests/${nginxTag}", returnStatus: true) == 0
+                        script {
+                            def head     = sh(script: 'git rev-parse HEAD | cut -c1-7', returnStdout: true).trim()
+                            def webTag   = sh(script: 'git log -1 --format=%H -- campuscart-backend | cut -c1-7', returnStdout: true).trim() ?: head
+                            def nginxTag = sh(script: 'git log -1 --format=%H -- nginx frontend .dockerignore | cut -c1-7', returnStdout: true).trim() ?: head
 
-                        env.WEB_TAG      = webTag
-                        env.NGINX_TAG    = nginxTag
-                        env.WEB_EXISTS   = webExists ? 'true' : 'false'
-                        env.NGINX_EXISTS = nginxExists ? 'true' : 'false'
-                        echo "web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
+                            def accept = 'application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json'
+                            def webExists   = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-web/manifests/${webTag}", returnStatus: true) == 0
+                            def nginxExists = sh(script: "wget -q --spider --header='Accept: ${accept}' http://192.168.1.3:5000/v2/campuscart-nginx/manifests/${nginxTag}", returnStatus: true) == 0
+
+                            env.WEB_TAG      = webTag
+                            env.NGINX_TAG    = nginxTag
+                            env.WEB_EXISTS   = webExists ? 'true' : 'false'
+                            env.NGINX_EXISTS = nginxExists ? 'true' : 'false'
+                            echo "MAIN source HEAD ${head}; web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
+                        }
+
                     }
-                    stash name: 'source', includes: '**'
+                    stash name: 'source', includes: 'app-source/**', excludes: 'app-source/.git/**'
                 }
             }
         }
@@ -133,12 +141,12 @@ spec:
                     '''
 
                     sh '''
-                        cd campuscart-backend
+                        cd app-source/campuscart-backend
                         pip install --no-cache-dir -r requirements.txt
                     '''
 
                     sh '''
-                        cd campuscart-backend
+                        cd app-source/campuscart-backend
                         python manage.py test --noinput --verbosity=2
                     '''
                 }
@@ -176,7 +184,7 @@ spec:
                     unstash 'source'
                     sh '''
                         pip install --no-cache-dir -q pip-audit bandit
-                        cd campuscart-backend
+                        cd app-source/campuscart-backend
                         bandit -r . -q -ll
                         pip-audit -r requirements.txt --no-deps --disable-pip
                     '''
@@ -227,8 +235,8 @@ spec:
                     sh '''
                         if [ "${WEB_EXISTS}" = "true" ]; then echo "web image ${WEB_TAG} is already in the registry, skipping its build"; exit 0; fi
                         /kaniko/executor \
-                          --context=dir://$(pwd)/campuscart-backend \
-                          --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
+                          --context=dir://$(pwd)/app-source/campuscart-backend \
+                          --dockerfile=$(pwd)/app-source/campuscart-backend/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-web:${WEB_TAG} \
                           --destination=192.168.1.3:5000/campuscart-web:latest \
                           --insecure \
@@ -242,8 +250,8 @@ spec:
                     sh '''
                         if [ "${NGINX_EXISTS}" = "true" ]; then echo "nginx image ${NGINX_TAG} is already in the registry, skipping its build"; exit 0; fi
                         /kaniko/executor \
-                          --context=dir://$(pwd) \
-                          --dockerfile=$(pwd)/nginx/Dockerfile \
+                          --context=dir://$(pwd)/app-source \
+                          --dockerfile=$(pwd)/app-source/nginx/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-nginx:${NGINX_TAG} \
                           --destination=192.168.1.3:5000/campuscart-nginx:latest \
                           --insecure \
