@@ -4,9 +4,9 @@ pipeline {
     agent none
 
     parameters {
-        // Branch of campuscart-config that receives the tag commit. 'ci-test' is safe:
-        // Argo CD only watches 'main'. Change the default to 'main' to deploy for real.
-        string(name: 'CONFIG_BRANCH', defaultValue: 'ci-test', description: 'campuscart-config branch to commit image tags to')
+        // No branch parameter on purpose: every run starts from the current main of campuscart-config,
+        // pushes a fresh promote-<web>-<nginx> branch and prints a pull request link. Production only
+        // changes when you merge that pull request.
         // Validation mode: run Test, Security Scan and the image builds even when both images
         // already exist in the registry. Images that already exist are built WITHOUT pushing,
         // so nothing in the registry changes and tags stay immutable.
@@ -21,8 +21,7 @@ pipeline {
     }
 
     environment {
-        CONFIG_BRANCH = "${params.CONFIG_BRANCH}"
-        FORCE_BUILD   = "${params.FORCE_BUILD}"
+        FORCE_BUILD = "${params.FORCE_BUILD}"
     }
 
     stages {
@@ -339,9 +338,12 @@ spec:
                             git config --global user.name "jenkins-ci"
                             git config --global user.email "jenkins-ci@campuscart.local"
 
+                            BRANCH="promote-${WEB_TAG}-${NGINX_TAG}"
+
                             rm -rf /tmp/config
-                            git clone --branch "${CONFIG_BRANCH}" git@github.com:bharathMoger18/campuscart-config.git /tmp/config
+                            git clone --branch main git@github.com:bharathMoger18/campuscart-config.git /tmp/config
                             cd /tmp/config
+                            git checkout -b "${BRANCH}"
 
                             F=overlays/production/kustomization.yaml
                             sed -i "/campuscart-web/{n;s/newTag: .*/newTag: ${WEB_TAG}/;}" ${F}
@@ -351,22 +353,27 @@ spec:
                             grep -A1 "campuscart-nginx" ${F} | grep -q "newTag: ${NGINX_TAG}" || { echo "nginx tag edit did not apply"; exit 1; }
 
                             if git diff --quiet; then
-                                echo "Config repo (${CONFIG_BRANCH}) already points at web ${WEB_TAG} / nginx ${NGINX_TAG}: nothing to commit"
+                                echo "main already points at web ${WEB_TAG} / nginx ${NGINX_TAG}: nothing to promote"
                                 exit 0
                             fi
 
                             git diff
                             git add ${F}
-                            git commit -m "ci: deploy web ${WEB_TAG}, nginx ${NGINX_TAG} (Jenkins build #${BUILD_NUMBER})"
+                            git commit -m "ci: promote web ${WEB_TAG}, nginx ${NGINX_TAG} (Jenkins build #${BUILD_NUMBER})"
 
                             pushed=false
                             for attempt in 1 2 3; do
-                                if git push origin "HEAD:${CONFIG_BRANCH}"; then pushed=true; break; fi
-                                echo "push rejected (attempt ${attempt}), rebasing and retrying"
-                                git pull --rebase origin "${CONFIG_BRANCH}"
+                                if git push --force origin "HEAD:refs/heads/${BRANCH}"; then pushed=true; break; fi
+                                echo "push failed (attempt ${attempt}), retrying in 5s"
+                                sleep 5
                             done
                             [ "${pushed}" = "true" ] || { echo "could not push after 3 attempts"; exit 1; }
-                            echo "Config repo updated; Argo CD will roll it out if ${CONFIG_BRANCH} is the branch it watches."
+
+                            echo "================================================================"
+                            echo "Promotion branch pushed: ${BRANCH}"
+                            echo "Open the pull request, review it, and merge it to deploy:"
+                            echo "https://github.com/bharathMoger18/campuscart-config/compare/main...${BRANCH}?expand=1"
+                            echo "================================================================"
                         '''
                     }
                 }
