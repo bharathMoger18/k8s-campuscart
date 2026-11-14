@@ -1,4 +1,5 @@
 FROM nginx:alpine 
+LABEL org.opencontainers.image.source="https://github.com/bharathMoger18/k8s-campuscart"
 
 RUN apk upgrade --no-cache
 
