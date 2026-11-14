@@ -24,6 +24,8 @@ pipeline {
         AWS_REGION   = 'ap-south-1'
         CLUSTER_NAME = 'campuscart-eks'
         APP_NS       = 'campuscart'
+        // EDIT ME: Jenkins user IDs or group names (comma separated) allowed to click Apply / Deploy.
+        APPROVERS    = 'devops-approvers'
     }
 
     stages {
@@ -380,7 +382,9 @@ spec:
             steps {
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
-                        message: 'Review the Terraform plan above. Apply these infrastructure changes?'
+                        message: 'Review the plan in the Show Terraform Plan stage. Look for any destroy or replace of RDS, VPC, EKS or state. Apply these infrastructure changes to production?',
+                        ok: 'Apply',
+                        submitter: env.APPROVERS
                     )
                 }
             }
@@ -623,6 +627,23 @@ spec:
                     '''
 
                     stash name: 'rendered-manifests', includes: 'rendered/**'
+                }
+            }
+        }
+
+        stage('Approve Production Deploy') {
+            when {
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent none
+
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: "Deploy backend ${env.WEB_TAG} and nginx ${env.NGINX_TAG} to ${env.CLUSTER_NAME} (namespace ${env.APP_NS})? The migration Job runs first. Database migrations are NOT rolled back automatically.",
+                        ok: 'Deploy',
+                        submitter: env.APPROVERS
+                    )
                 }
             }
         }
