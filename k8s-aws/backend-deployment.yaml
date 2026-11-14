@@ -71,14 +71,14 @@ spec:
           # ---------------------------------------------------------------
           livenessProbe:
             httpGet:
-              path: /health/
+              path: /healthz
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 20
 
           readinessProbe:
             httpGet:
-              path: /health/
+              path: /api/v1/readyz
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -89,6 +89,6 @@ spec:
           # ---------------------------------------------------------------
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1000
+            runAsUser: 100
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false # Django needs to write things like collected static files/media at runtime in this setup; a stricter setup would mount a dedicated writable volume instead and set this to true

@@ -25,6 +25,10 @@ metadata:
     # network hop. "ip" mode is the more modern, more efficient choice.
     alb.ingress.kubernetes.io/target-type: ip
 
+    # ALB health checks hit each pod directly. Django has /healthz and the nginx config answers /healthz itself,
+    # so one path works for both target groups. The default path (/) would 404 on the backend.
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+
     # Listen on both 80 and 443 — but see the redirect rule below, plain
     # HTTP never actually serves content, it only redirects to HTTPS.
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
@@ -40,8 +44,7 @@ metadata:
 
 spec:
   rules:
-    # - host: "${DOMAIN_NAME}" # same envsubst-templated placeholder pattern as before
-      http:
+    - http:  # add  host: "${DOMAIN_NAME}"  here once a domain exists
         paths:
           # ORDER MATTERS in some ALB Controller versions when paths
           # overlap — more SPECIFIC paths should generally come first,

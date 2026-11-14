@@ -21,6 +21,8 @@ data:
   DB_HOST: "${RDS_ENDPOINT}"
   DB_PORT: "5432"
   DB_NAME: "campuscart"
+  # RDS creates this user (terraform rds module, variable db_username); the app default campuscart_user does not exist there.
+  DB_USER: "campuscart_admin"
 
   REDIS_HOST: "${REDIS_ENDPOINT}"
   REDIS_PORT: "6379"
