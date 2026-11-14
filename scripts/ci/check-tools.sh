@@ -10,17 +10,17 @@ fail=0
 
 # name | image | shell | tools the stage needs (a leading / means "file must be executable") | version command
 CHECKS=(
-  "checkout-git|alpine/git:latest|sh|git|git --version"
+  "checkout-git|alpine/git:v2.54.0|sh|git|git --version"
   "checkout-aws|amazon/aws-cli:2.17.0|sh|aws|aws --version"
-  "test-python|python:3.12-slim|sh|python pip apt-get|python --version"
-  "test-postgres|postgres:15-alpine|sh|pg_isready postgres|postgres --version"
-  "test-redis|redis:7-alpine|sh|redis-server|redis-server --version"
+  "test-python|python:3.12.16-slim|sh|python pip apt-get|python --version"
+  "test-postgres|postgres:15.20-alpine|sh|pg_isready postgres|postgres --version"
+  "test-redis|redis:7.4.12-alpine|sh|redis-server|redis-server --version"
   "terraform|hashicorp/terraform:1.10.5|sh|terraform|terraform version"
-  "render-now|hashicorp/terraform:1.10.5|sh|envsubst jq|"
-  "deploy-now|amazon/aws-cli:2.17.0|sh|aws kubectl envsubst jq|"
-  "deploy-candidate|alpine/k8s:1.29.15|sh|aws kubectl envsubst jq curl git|kubectl version --client"
-  "build-kaniko|gcr.io/kaniko-project/executor:debug|/busybox/sh|/kaniko/executor|/kaniko/executor version"
-  "notify|alpine/k8s:1.29.15|sh|curl|curl --version"
+  "render-templating|alpine/k8s:1.31.13|sh|envsubst jq|envsubst --version"
+  "deploy|alpine/k8s:1.31.13|sh|aws kubectl envsubst jq curl git|kubectl version --client"
+  "deploy-aws|alpine/k8s:1.31.13|sh|aws|aws --version"
+  "build-kaniko|gcr.io/kaniko-project/executor:v1.24.0-debug|/busybox/sh|/kaniko/executor|/kaniko/executor version"
+  "notify|alpine/k8s:1.31.13|sh|curl|curl --version"
 )
 
 check_tools() {
