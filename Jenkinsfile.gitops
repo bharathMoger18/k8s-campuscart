@@ -254,10 +254,12 @@ spec:
                     unstash 'source'
                     sh '''
                         PUSH_FLAGS=""
+                        CACHE_FLAG="--cache=true"
                         if [ "${WEB_EXISTS}" = "true" ]; then
                             if [ "${FORCE_BUILD}" = "true" ]; then
                                 echo "FORCE_BUILD: building web ${WEB_TAG} WITHOUT pushing (the tag already exists in the registry)"
-                                PUSH_FLAGS="--no-push --no-push-cache"
+                                PUSH_FLAGS="--no-push"
+                                CACHE_FLAG="--cache=false"
                             else
                                 echo "web image ${WEB_TAG} is already in the registry, skipping its build"
                                 exit 0
@@ -269,7 +271,7 @@ spec:
                           --destination=192.168.1.3:5000/campuscart-web:${WEB_TAG} \
                           --insecure \
                           --insecure-pull \
-                          --cache=true \
+                          ${CACHE_FLAG} \
                           ${PUSH_FLAGS}
                     '''
                 }
@@ -278,10 +280,12 @@ spec:
                     unstash 'source'
                     sh '''
                         PUSH_FLAGS=""
+                        CACHE_FLAG="--cache=true"
                         if [ "${NGINX_EXISTS}" = "true" ]; then
                             if [ "${FORCE_BUILD}" = "true" ]; then
                                 echo "FORCE_BUILD: building nginx ${NGINX_TAG} WITHOUT pushing (the tag already exists in the registry)"
-                                PUSH_FLAGS="--no-push --no-push-cache"
+                                PUSH_FLAGS="--no-push"
+                                CACHE_FLAG="--cache=false"
                             else
                                 echo "nginx image ${NGINX_TAG} is already in the registry, skipping its build"
                                 exit 0
@@ -293,7 +297,7 @@ spec:
                           --destination=192.168.1.3:5000/campuscart-nginx:${NGINX_TAG} \
                           --insecure \
                           --insecure-pull \
-                          --cache=true \
+                          ${CACHE_FLAG} \
                           ${PUSH_FLAGS}
                     '''
                 }
