@@ -7,10 +7,22 @@ pipeline {
         // Branch of campuscart-config that receives the tag commit. 'ci-test' is safe:
         // Argo CD only watches 'main'. Change the default to 'main' to deploy for real.
         string(name: 'CONFIG_BRANCH', defaultValue: 'ci-test', description: 'campuscart-config branch to commit image tags to')
+        // Validation mode: run Test, Security Scan and the image builds even when both images
+        // already exist in the registry. Images that already exist are built WITHOUT pushing,
+        // so nothing in the registry changes and tags stay immutable.
+        booleanParam(name: 'FORCE_BUILD', defaultValue: false, description: 'Run Test, Security Scan and a no-push image build even if the images already exist (pipeline validation)')
+    }
+
+    options {
+        // One build at a time: two builds must never race on the config repo.
+        disableConcurrentBuilds()
+        // Safety net so a hung build cannot block the queue forever.
+        timeout(time: 60, unit: 'MINUTES')
     }
 
     environment {
         CONFIG_BRANCH = "${params.CONFIG_BRANCH}"
+        FORCE_BUILD   = "${params.FORCE_BUILD}"
     }
 
     stages {
@@ -53,7 +65,13 @@ spec:
                             env.NGINX_TAG    = nginxTag
                             env.WEB_EXISTS   = webExists ? 'true' : 'false'
                             env.NGINX_EXISTS = nginxExists ? 'true' : 'false'
+
+                            // Which stages will run. FORCE_BUILD turns the checks and builds on even for existing images.
+                            env.RUN_CHECKS = (params.FORCE_BUILD || !webExists) ? 'true' : 'false'
+                            env.RUN_BUILD  = (params.FORCE_BUILD || !webExists || !nginxExists) ? 'true' : 'false'
+
                             echo "MAIN source HEAD ${head}; web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
+                            echo "Plan: Test + Security Scan = ${env.RUN_CHECKS}; Build = ${env.RUN_BUILD}; FORCE_BUILD = ${params.FORCE_BUILD}"
                         }
 
                     }
@@ -65,7 +83,7 @@ spec:
         stage('Test') {
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' }
+                expression { env.RUN_CHECKS == 'true' }
             }
             agent {
                 kubernetes {
@@ -142,6 +160,8 @@ spec:
 
                     sh '''
                         cd app-source/campuscart-backend
+                        export PIP_TIMEOUT=1200
+                        export PIP_RETRIES=5
                         pip install --no-cache-dir -r requirements.txt
                     '''
 
@@ -156,7 +176,7 @@ spec:
         stage('Security Scan') {
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' }
+                expression { env.RUN_CHECKS == 'true' }
             }
             agent {
                 kubernetes {
@@ -186,7 +206,7 @@ spec:
                         pip install --no-cache-dir -q pip-audit bandit
                         cd app-source/campuscart-backend
                         bandit -r . -q -ll
-                        pip-audit -r requirements.txt --no-deps --disable-pip
+                        pip-audit --timeout 120 -r requirements.txt --no-deps --disable-pip
                     '''
                 }
             }
@@ -195,7 +215,7 @@ spec:
         stage('Build and Push Images') {
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+                expression { env.RUN_BUILD == 'true' }
             }
             agent {
                 kubernetes {
@@ -233,30 +253,48 @@ spec:
                 container('kaniko-web') {
                     unstash 'source'
                     sh '''
-                        if [ "${WEB_EXISTS}" = "true" ]; then echo "web image ${WEB_TAG} is already in the registry, skipping its build"; exit 0; fi
+                        PUSH_FLAGS=""
+                        if [ "${WEB_EXISTS}" = "true" ]; then
+                            if [ "${FORCE_BUILD}" = "true" ]; then
+                                echo "FORCE_BUILD: building web ${WEB_TAG} WITHOUT pushing (the tag already exists in the registry)"
+                                PUSH_FLAGS="--no-push --no-push-cache"
+                            else
+                                echo "web image ${WEB_TAG} is already in the registry, skipping its build"
+                                exit 0
+                            fi
+                        fi
                         /kaniko/executor \
                           --context=dir://$(pwd)/app-source/campuscart-backend \
                           --dockerfile=$(pwd)/app-source/campuscart-backend/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-web:${WEB_TAG} \
-                          --destination=192.168.1.3:5000/campuscart-web:latest \
                           --insecure \
                           --insecure-pull \
-                          --cache=true
+                          --cache=true \
+                          ${PUSH_FLAGS}
                     '''
                 }
 
                 container('kaniko-nginx') {
                     unstash 'source'
                     sh '''
-                        if [ "${NGINX_EXISTS}" = "true" ]; then echo "nginx image ${NGINX_TAG} is already in the registry, skipping its build"; exit 0; fi
+                        PUSH_FLAGS=""
+                        if [ "${NGINX_EXISTS}" = "true" ]; then
+                            if [ "${FORCE_BUILD}" = "true" ]; then
+                                echo "FORCE_BUILD: building nginx ${NGINX_TAG} WITHOUT pushing (the tag already exists in the registry)"
+                                PUSH_FLAGS="--no-push --no-push-cache"
+                            else
+                                echo "nginx image ${NGINX_TAG} is already in the registry, skipping its build"
+                                exit 0
+                            fi
+                        fi
                         /kaniko/executor \
                           --context=dir://$(pwd)/app-source \
                           --dockerfile=$(pwd)/app-source/nginx/Dockerfile \
                           --destination=192.168.1.3:5000/campuscart-nginx:${NGINX_TAG} \
-                          --destination=192.168.1.3:5000/campuscart-nginx:latest \
                           --insecure \
                           --insecure-pull \
-                          --cache=true
+                          --cache=true \
+                          ${PUSH_FLAGS}
                     '''
                 }
             }
