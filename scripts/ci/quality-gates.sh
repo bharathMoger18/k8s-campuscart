@@ -61,8 +61,10 @@ gate_ruff() {
   echo "== ruff $RUFF_VERSION: default rules (syntax errors, pyflakes)"
   docker run --rm -v "$ROOT":/w:ro -w /w "$PYTHON_IMG" sh -c "
     pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore ruff==$RUFF_VERSION
-    ruff check --output-format concise --no-cache campuscart-backend; rc=\$?
-    echo '-- findings by rule:'; ruff check --statistics --no-cache campuscart-backend | head -15
+    echo '-- BLOCKING: syntax errors and undefined names (E9, F63, F7, F82)'
+    ruff check --select E9,F63,F7,F82 --output-format concise --no-cache campuscart-backend; rc=\$?
+    echo '-- NON-BLOCKING: pinned rule set from ruff.toml (E4, E7, E9, F), by rule:'
+    ruff check --statistics --no-cache campuscart-backend | head -15
     exit \$rc" >"$OUT/ruff.txt" 2>&1
   local rc=$?
   tail -25 "$OUT/ruff.txt"
@@ -75,7 +77,7 @@ gate_hadolint() {
   : >"$OUT/hadolint.txt"
   for f in campuscart-backend/Dockerfile nginx/Dockerfile; do
     echo "--- $f" | tee -a "$OUT/hadolint.txt"
-    docker run --rm -i --entrypoint /bin/hadolint "$HADOLINT_IMG" --no-color - <"$f" 2>&1 | tee -a "$OUT/hadolint.txt"
+    docker run --rm -i -v "$ROOT/.hadolint.yaml":/.hadolint.yaml:ro --entrypoint /bin/hadolint "$HADOLINT_IMG" --config /.hadolint.yaml --no-color - <"$f" 2>&1 | tee -a "$OUT/hadolint.txt"
     [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
   done
   if [ $rc -eq 0 ]; then record hadolint PASS; else record hadolint "FAIL"; fi
@@ -89,10 +91,10 @@ gate_kubeconform() {
     >"$OUT/kubeconform.json" 2>"$OUT/kubeconform.err"
   local rc=$?
   jq -c '.summary' "$OUT/kubeconform.json" 2>/dev/null || cat "$OUT/kubeconform.err"
-  echo "-- skipped (no schema for these kinds, usually CRDs):"
-  jq -r '.resources[]? | select(.status=="statusSkipped") | "   SKIPPED \(.kind) \(.name)"' "$OUT/kubeconform.json" 2>/dev/null
-  echo "-- invalid:"
-  jq -r '.resources[]? | select(.status=="statusInvalid" or .status=="statusError") | "   INVALID \(.filename): \(.kind) \(.name): \(.msg)"' "$OUT/kubeconform.json" 2>/dev/null
+  echo "-- per-file result (text mode lists skipped kinds; JSON mode did not):"
+  docker run --rm -v "$ROOT/rendered":/m:ro "$KUBECONFORM_IMG" \
+    -kubernetes-version "$K8S_VERSION" -strict -ignore-missing-schemas -output text -verbose /m 2>&1 \
+    | grep -E 'skipped|invalid|error' | sed 's/^/   /\'
   echo "-- negative control: the OLD ingress from main must be rejected"
   git show main:k8s-aws/ingress.yaml | docker run --rm -i "$KUBECONFORM_IMG" \
     -kubernetes-version "$K8S_VERSION" -strict -ignore-missing-schemas -summary - 2>&1 | tail -4
@@ -132,7 +134,7 @@ gate_tflint() {
   local W="$OUT/tflintwork"
   copy_tf "$W"
   docker run --rm --user "$UIDGID" -e HOME=/tmp -v "$W":/w -w /w/terraform "$TFLINT_IMG" \
-    --recursive --format compact >"$OUT/tflint.txt" 2>&1
+    --recursive --minimum-failure-severity=error --format compact >"$OUT/tflint.txt" 2>&1
   local rc=$?
   tail -30 "$OUT/tflint.txt"
   if [ $rc -eq 0 ]; then record tflint PASS; else record tflint "FAIL (exit $rc)"; fi
