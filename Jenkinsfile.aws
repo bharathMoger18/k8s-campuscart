@@ -1,10 +1,18 @@
-
 pipeline {
     agent none
+
+    parameters {
+        booleanParam(
+            name: 'RUN_AWS',
+            defaultValue: false,
+            description: 'Run the stages that touch AWS (ECR, Terraform, EKS). Leave unchecked for a fully local run.'
+        )
+    }
 
     environment {
         AWS_REGION   = 'ap-south-1'
         CLUSTER_NAME = 'campuscart-eks'
+        APP_NS       = 'campuscart'
     }
 
     stages {
@@ -21,21 +29,20 @@ spec:
       image: alpine/git:v2.54.0
       command: ["cat"]
       tty: true
-
-    - name: aws-cli
-      image: amazon/aws-cli:2.17.0
-      command: ["cat"]
-      tty: true
 '''
                 }
             }
             steps {
                 container('git') {
-                    checkout scm
-
-                    sh 'git config --global --add safe.directory "$(pwd)"'
-
                     script {
+                        def scmVars = checkout scm
+                        sh 'git config --global --add safe.directory "$(pwd)"'
+
+                        // Works for multibranch (BRANCH_NAME) and for a plain Pipeline-from-SCM job (GIT_BRANCH).
+                        def branch = env.BRANCH_NAME ?: (scmVars.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+                        env.IS_MAIN = (branch == 'main') ? 'true' : 'false'
+                        echo "branch '${branch}' -> IS_MAIN=${env.IS_MAIN} (only main may push, apply or deploy, and only with RUN_AWS)"
+
                         def head = sh(
                             script: 'git rev-parse HEAD | cut -c1-7',
                             returnStdout: true
@@ -53,9 +60,37 @@ spec:
 
                         env.WEB_TAG = webTag
                         env.NGINX_TAG = nginxTag
+
+                        // Without an ECR lookup we assume "not built yet", so Test and Scan always run.
+                        env.WEB_EXISTS = 'false'
+                        env.NGINX_EXISTS = 'false'
                     }
                 }
 
+                stash name: 'source', includes: '**'
+            }
+        }
+
+        stage('Check ECR') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: aws-cli
+      image: amazon/aws-cli:2.17.0
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
                 withCredentials([[
                     $class: 'AmazonWebServicesCredentialsBinding',
                     credentialsId: 'aws-campuscart-ci'
@@ -92,15 +127,13 @@ spec:
                         }
                     }
                 }
-
-                stash name: 'source', includes: '**'
             }
         }
 
         stage('Test') {
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' }
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
             }
             agent {
                 kubernetes {
@@ -202,7 +235,7 @@ spec:
         stage('Security Scan') {
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' }
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
             }
             agent {
                 kubernetes {
@@ -245,6 +278,10 @@ spec:
         }
 
         stage('Terraform Plan') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -281,6 +318,10 @@ spec:
         }
 
         stage('Show Terraform Plan') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -304,6 +345,9 @@ spec:
         }
 
         stage('Approve Infrastructure Changes') {
+            when {
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent none
 
             steps {
@@ -316,6 +360,10 @@ spec:
         }
 
         stage('Terraform Apply') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -348,6 +396,10 @@ spec:
         }
 
         stage('Prepare AWS Context') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -386,7 +438,8 @@ spec:
             when {
                 beforeAgent true
                 expression {
-                    env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true'
+                    params.RUN_AWS && env.IS_MAIN == 'true' &&
+                    (env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true')
                 }
             }
             agent {
@@ -464,7 +517,11 @@ spec:
             }
         }
 
-        stage('Render Manifests') {
+        stage('Read Terraform Outputs') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -489,55 +546,46 @@ spec:
                     ]]) {
                         dir('terraform/environments/production') {
                             sh 'terraform init -input=false'
-
-                            script {
-                                env.RDS_ENDPOINT = sh(
-                                    script: 'terraform output -raw db_endpoint',
-                                    returnStdout: true
-                                ).trim()
-
-                                env.REDIS_ENDPOINT = sh(
-                                    script: 'terraform output -raw redis_endpoint',
-                                    returnStdout: true
-                                ).trim()
-
-                                env.ECR_BACKEND_IMAGE = sh(
-                                    script: """terraform output -json ecr_repository_urls | jq -r '.["campuscart-backend"]'""",
-                                    returnStdout: true
-                                ).trim()
-
-                                env.ECR_NGINX_IMAGE = sh(
-                                    script: """terraform output -json ecr_repository_urls | jq -r '.["campuscart-nginx"]'""",
-                                    returnStdout: true
-                                ).trim()
-                            }
+                            sh 'terraform output -json > "$WORKSPACE/tf-outputs.json"'
                         }
                     }
 
+                    stash name: 'tf-outputs', includes: 'tf-outputs.json'
+                }
+            }
+        }
+
+        stage('Render Manifests') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
+                container('tools') {
+                    unstash 'source'
+                    unstash 'tf-outputs'
+
                     sh '''
-                        mkdir -p rendered
-
-                        for f in k8s-aws/*.yaml; do
-                            filename=$(basename "$f")
-
-                            case "$filename" in
-                                nginx-deployment.yaml)
-                                    IMAGE_TAG="$NGINX_TAG" \
-                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
-                                      < "$f" > "rendered/$filename"
-                                    ;;
-                                backend-deployment.yaml|migrate-job.yaml)
-                                    IMAGE_TAG="$WEB_TAG" \
-                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
-                                      < "$f" > "rendered/$filename"
-                                    ;;
-                                *)
-                                    IMAGE_TAG="$WEB_TAG" \
-                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
-                                      < "$f" > "rendered/$filename"
-                                    ;;
-                            esac
-                        done
+                        RDS_ENDPOINT=$(jq -r '.db_endpoint.value' tf-outputs.json)
+                        REDIS_ENDPOINT=$(jq -r '.redis_endpoint.value' tf-outputs.json)
+                        ECR_BACKEND_IMAGE=$(jq -r '.ecr_repository_urls.value["campuscart-backend"]' tf-outputs.json)
+                        ECR_NGINX_IMAGE=$(jq -r '.ecr_repository_urls.value["campuscart-nginx"]' tf-outputs.json)
+                        export RDS_ENDPOINT REDIS_ENDPOINT ECR_BACKEND_IMAGE ECR_NGINX_IMAGE
+                        sh scripts/ci/render-manifests.sh
                     '''
 
                     stash name: 'rendered-manifests', includes: 'rendered/**'
@@ -546,6 +594,10 @@ spec:
         }
 
         stage('Deploy to EKS') {
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -562,6 +614,7 @@ spec:
             }
             steps {
                 container('kubectl') {
+                    unstash 'source'
                     unstash 'rendered-manifests'
 
                     withCredentials([[
@@ -574,27 +627,57 @@ spec:
                               --region "$AWS_REGION"
                         '''
 
+                        // 1. Namespace, config and secret plumbing. The migration Job needs the DB Secret to exist.
                         sh '''
                             kubectl apply -f rendered/namespace.yaml
                             kubectl apply -f rendered/configmap.yaml
+                            kubectl apply -f rendered/nginx-configmap.yaml
                             kubectl apply -f rendered/serviceaccount.yaml
                             kubectl apply -f rendered/secretstore.yaml
                             kubectl apply -f rendered/externalsecret.yaml
-                            kubectl apply -f rendered/backend-deployment.yaml
+                            kubectl wait --for=condition=Ready externalsecret/campuscart-db-secret \
+                              -n "$APP_NS" --timeout=180s
                             kubectl apply -f rendered/backend-service.yaml
-                            kubectl apply -f rendered/nginx-deployment.yaml
                             kubectl apply -f rendered/nginx-service.yaml
                             kubectl apply -f rendered/ingress.yaml
+                        '''
+
+                        // 2. Remember what is running NOW, before this build changes anything.
+                        //    post { failure } only restores Deployments whose revision moved past these numbers.
+                        script {
+                            env.WEB_REV_BEFORE = sh(
+                                script: 'sh scripts/ci/rollback.sh revision "$APP_NS" campuscart-backend',
+                                returnStdout: true
+                            ).trim()
+                            env.NGINX_REV_BEFORE = sh(
+                                script: 'sh scripts/ci/rollback.sh revision "$APP_NS" campuscart-nginx',
+                                returnStdout: true
+                            ).trim()
+                            env.ROLLBACK_ARMED = 'true'
+                            echo "Revisions before deploy: backend=${env.WEB_REV_BEFORE ?: 'none'} nginx=${env.NGINX_REV_BEFORE ?: 'none'}"
+                        }
+
+                        // 3. Database migration FIRST. If it fails, the deploy stops here and no Deployment is touched.
+                        sh '''
+                            kubectl delete job campuscart-migrate -n "$APP_NS" --ignore-not-found
+                            kubectl apply -f rendered/migrate-job.yaml
+                            sh scripts/ci/wait-for-job.sh "$APP_NS" campuscart-migrate 300
+                        '''
+
+                        // 4. New Deployments, then wait for them.
+                        sh '''
+                            kubectl apply -f rendered/backend-deployment.yaml
+                            kubectl apply -f rendered/nginx-deployment.yaml
                             kubectl apply -f rendered/hpa.yaml
                         '''
 
                         sh '''
                             kubectl rollout status deployment/campuscart-backend \
-                              -n campuscart \
-                              --timeout=180s
+                              -n "$APP_NS" \
+                              --timeout=300s
 
                             kubectl rollout status deployment/campuscart-nginx \
-                              -n campuscart \
+                              -n "$APP_NS" \
                               --timeout=120s
                         '''
                     }
@@ -605,7 +688,7 @@ spec:
 
     post {
         success {
-            echo "Deployed backend ${env.WEB_TAG} and nginx ${env.NGINX_TAG} to EKS successfully."
+            echo "Build #${env.BUILD_NUMBER} OK (RUN_AWS=${params.RUN_AWS}, branch main: ${env.IS_MAIN}), backend ${env.WEB_TAG}, nginx ${env.NGINX_TAG}."
         }
 
         failure {
@@ -613,26 +696,49 @@ spec:
 
             script {
                 try {
-                    timeout(time: 3, unit: 'MINUTES') {
+                    timeout(time: 15, unit: 'MINUTES') {
                         podTemplate(yaml: '''
 apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - name: curl
+    - name: tools
       image: alpine/k8s:1.31.13
       command: ["cat"]
       tty: true
       resources:
         requests:
-          cpu: "50m"
-          memory: "64Mi"
-        limits:
-          cpu: "200m"
+          cpu: "100m"
           memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
 ''') {
                             node(POD_LABEL) {
-                                container('curl') {
+                                container('tools') {
+                                    // Roll back first, then notify. A failed rollback must still reach the notification.
+                                    if (env.ROLLBACK_ARMED == 'true') {
+                                        try {
+                                            unstash 'source'
+                                            withCredentials([[
+                                                $class: 'AmazonWebServicesCredentialsBinding',
+                                                credentialsId: 'aws-campuscart-ci'
+                                            ]]) {
+                                                sh '''
+                                                    aws eks update-kubeconfig \
+                                                      --name "$CLUSTER_NAME" \
+                                                      --region "$AWS_REGION"
+
+                                                    sh scripts/ci/rollback.sh undo "$APP_NS" \
+                                                      "campuscart-backend:${WEB_REV_BEFORE}" \
+                                                      "campuscart-nginx:${NGINX_REV_BEFORE}"
+                                                '''
+                                            }
+                                        } catch (rbErr) {
+                                            echo "ROLLBACK FAILED, fix the cluster by hand: ${rbErr.message}"
+                                        }
+                                    }
+
                                     withCredentials([
                                         string(
                                             credentialsId: 'notify-webhook',
@@ -653,7 +759,7 @@ spec:
                         }
                     }
                 } catch (err) {
-                    echo "Failure notification skipped: ${err.message}"
+                    echo "Failure handling skipped: ${err.message}"
                 }
             }
         }
