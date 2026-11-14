@@ -216,10 +216,14 @@ spec:
                 container('python') {
                     unstash 'source'
 
-                    sh '''
-                        apt-get update -qq
-                        apt-get install -y -qq netcat-openbsd > /dev/null
+                    retry(2) {
+                        sh '''
+                            apt-get update -qq
+                            apt-get install -y -qq netcat-openbsd > /dev/null
+                        '''
+                    }
 
+                    sh '''
                         until nc -z localhost 5432; do
                             echo "Waiting for Postgres..."
                             sleep 2
@@ -233,10 +237,13 @@ spec:
                         echo "Postgres and Redis are ready."
                     '''
 
-                    sh '''
-                        cd campuscart-backend
-                        pip install --no-cache-dir -r requirements.txt
-                    '''
+                    retry(2) {
+                        sh '''
+                            export PIP_TIMEOUT=300 PIP_RETRIES=5
+                            cd campuscart-backend
+                            pip install --no-cache-dir -r requirements.txt
+                        '''
+                    }
 
                     sh '''
                         cd campuscart-backend
@@ -277,17 +284,20 @@ spec:
                 container('python') {
                     unstash 'source'
 
-                    sh '''
-                        pip install --no-cache-dir -q pip-audit bandit
+                    retry(2) {
+                        sh '''
+                            export PIP_TIMEOUT=300 PIP_RETRIES=5
+                            pip install --no-cache-dir -q pip-audit bandit
 
-                        cd campuscart-backend
+                            cd campuscart-backend
 
-                        # Fail on MEDIUM severity and above.
-                        bandit -r . -q -ll
+                            # Fail on MEDIUM severity and above.
+                            bandit -r . -q -ll
 
-                        # Fail on known vulnerabilities in pinned requirements.
-                        pip-audit -r requirements.txt --no-deps --disable-pip
-                    '''
+                            # Fail on known vulnerabilities in pinned requirements (this call asks the network).
+                            pip-audit --timeout 120 -r requirements.txt --no-deps --disable-pip
+                        '''
+                    }
                 }
             }
         }
@@ -321,7 +331,7 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
+                            retry(2) { sh 'terraform init -input=false' }
                             sh 'terraform plan -input=false -out=tfplan'
                             sh 'terraform show -no-color tfplan > tfplan.txt'
                         }
@@ -405,7 +415,7 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
+                            retry(2) { sh 'terraform init -input=false' }
                             sh 'terraform apply -input=false tfplan'
                         }
                     }
@@ -440,10 +450,12 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         script {
-                            env.AWS_ACCOUNT_ID = sh(
-                                script: 'aws sts get-caller-identity --query Account --output text',
-                                returnStdout: true
-                            ).trim()
+                            retry(2) {
+                                env.AWS_ACCOUNT_ID = sh(
+                                    script: 'aws sts get-caller-identity --query Account --output text',
+                                    returnStdout: true
+                                ).trim()
+                            }
 
                             env.ECR_REGISTRY =
                                 "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
@@ -566,8 +578,8 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
-                            sh 'terraform output -json > "$WORKSPACE/tf-outputs.json"'
+                            retry(2) { sh 'terraform init -input=false' }
+                            retry(2) { sh 'terraform output -json > "$WORKSPACE/tf-outputs.json"' }
                         }
                     }
 
@@ -644,11 +656,13 @@ spec:
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
-                        sh '''
-                            aws eks update-kubeconfig \
-                              --name "$CLUSTER_NAME" \
-                              --region "$AWS_REGION"
-                        '''
+                        retry(2) {
+                            sh '''
+                                aws eks update-kubeconfig \
+                                  --name "$CLUSTER_NAME" \
+                                  --region "$AWS_REGION"
+                            '''
+                        }
 
                         // 1. Namespace, config and secret plumbing. The migration Job needs the DB Secret to exist.
                         sh '''
