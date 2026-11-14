@@ -57,7 +57,10 @@ check_pins() {
       echo "   BAD   line $n  $img  (no tag means :latest)"; fail=1; continue
     fi
     tag="${tag#*:}"
-    if [[ "$tag" == latest || "$tag" == debug ]] || ! [[ "$tag" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    # PostgreSQL versions are major.minor (15.20); every other image must be x.y.z
+    re='[0-9]+\.[0-9]+\.[0-9]+'
+    [[ "$img" == *postgres:* ]] && re='[0-9]+\.[0-9]+'
+    if [[ "$tag" == latest || "$tag" == debug ]] || ! [[ "$tag" =~ $re ]]; then
       echo "   BAD   line $n  $img  (not an exact x.y.z version)"; fail=1
     else
       echo "   ok    line $n  $img"
