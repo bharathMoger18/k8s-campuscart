@@ -554,7 +554,7 @@ kind: Pod
 spec:
   containers:
     - name: kubectl
-      image: amazon/aws-cli:2.17.0
+      image: alpine/k8s:1.31.13
       command: ["cat"]
       tty: true
 '''
@@ -620,7 +620,7 @@ kind: Pod
 spec:
   containers:
     - name: curl
-      image: alpine/k8s:1.29.15
+      image: alpine/k8s:1.31.13
       command: ["cat"]
       tty: true
       resources:
