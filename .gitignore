@@ -83,4 +83,4 @@ override.tf.json
 
 # CLI configuration can contain credentials/tokens in some setups.
 .terraformrc
-terraform.rc
+terraform.rcrendered/
