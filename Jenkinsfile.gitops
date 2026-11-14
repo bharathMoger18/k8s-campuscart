@@ -69,8 +69,27 @@ spec:
                             env.RUN_CHECKS = (params.FORCE_BUILD || !webExists) ? 'true' : 'false'
                             env.RUN_BUILD  = (params.FORCE_BUILD || !webExists || !nginxExists) ? 'true' : 'false'
 
+                            // Does production (main of the config repo) already run these tags? If yes there is
+                            // nothing to scan and nothing to promote. Read-only use of the same SSH key.
+                            def promoted = false
+                            withCredentials([sshUserPrivateKey(credentialsId: 'config-repo-write-key', keyFileVariable: 'SSH_KEY')]) {
+                                def mainTags = sh(returnStdout: true, script: '''
+                                    export GIT_SSH_COMMAND="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts"
+                                    rm -rf /tmp/config-check
+                                    git clone --quiet --depth 1 --branch main git@github.com:bharathMoger18/campuscart-config.git /tmp/config-check
+                                    F=/tmp/config-check/overlays/production/kustomization.yaml
+                                    web=$(grep -A1 "campuscart-web" ${F} | grep newTag | awk '{print $2}')
+                                    nginx=$(grep -A1 "campuscart-nginx" ${F} | grep newTag | awk '{print $2}')
+                                    echo "${web} ${nginx}"
+                                ''').trim()
+                                echo "config repo main currently runs: ${mainTags}"
+                                promoted = (mainTags == (webTag + ' ' + nginxTag))
+                            }
+                            env.NEEDS_PROMOTION = promoted ? 'false' : 'true'
+                            env.RUN_IMAGE_SCAN  = (params.FORCE_BUILD || !promoted) ? 'true' : 'false'
+
                             echo "MAIN source HEAD ${head}; web tag ${webTag} (already in registry: ${webExists}); nginx tag ${nginxTag} (already in registry: ${nginxExists})"
-                            echo "Plan: Test + Security Scan = ${env.RUN_CHECKS}; Build = ${env.RUN_BUILD}; FORCE_BUILD = ${params.FORCE_BUILD}"
+                            echo "Plan: Test + Security Scan = ${env.RUN_CHECKS}; Build = ${env.RUN_BUILD}; Image Scan = ${env.RUN_IMAGE_SCAN}; Promote = ${env.NEEDS_PROMOTION}; FORCE_BUILD = ${params.FORCE_BUILD}"
                         }
 
                     }
@@ -303,9 +322,56 @@ spec:
             }
         }
 
+        // Gate: the images that are about to be promoted must have no fixable HIGH/CRITICAL
+        // vulnerabilities. Runs on every run that would promote, so a failed scan keeps blocking
+        // that version (the image tag already exists, so the build is skipped on the next run).
+        stage('Image Scan') {
+            when {
+                beforeAgent true
+                expression { env.RUN_IMAGE_SCAN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: trivy
+    image: aquasec/trivy:latest
+    command: ["cat"]
+    tty: true
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "1"
+        memory: "1536Mi"
+'''
+                }
+            }
+            steps {
+                container('trivy') {
+                    sh '''
+                        rc=0
+                        for img in campuscart-web:${WEB_TAG} campuscart-nginx:${NGINX_TAG}; do
+                            echo "=== scanning ${img} ==="
+                            trivy image --insecure --ignore-unfixed --severity HIGH,CRITICAL --scanners vuln --exit-code 1 192.168.1.3:5000/${img} || rc=1
+                        done
+                        exit ${rc}
+                    '''
+                }
+            }
+        }
+
         // The only "deploy" step left: record the new tags in the config repo.
         // No cluster credentials are used anywhere in this pipeline.
         stage('Update Config Repo') {
+            when {
+                beforeAgent true
+                expression { env.NEEDS_PROMOTION == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
