@@ -18,7 +18,7 @@ kind: Pod
 spec:
   containers:
     - name: git
-      image: alpine/git:latest
+      image: alpine/git:v2.54.0
       command: ["cat"]
       tty: true
 
@@ -110,7 +110,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.12-slim
+      image: python:3.12.16-slim
       command: ["cat"]
       tty: true
       resources:
@@ -143,7 +143,7 @@ spec:
           value: "localhost,127.0.0.1"
 
     - name: postgres
-      image: postgres:15-alpine
+      image: postgres:15.20-alpine
       env:
         - name: POSTGRES_DB
           value: "test_campuscart_db"
@@ -157,7 +157,7 @@ spec:
           memory: "256Mi"
 
     - name: redis
-      image: redis:7-alpine
+      image: redis:7.4.12-alpine
       resources:
         requests:
           cpu: "100m"
@@ -212,7 +212,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.12-slim
+      image: python:3.12.16-slim
       command: ["cat"]
       tty: true
       resources:
@@ -289,7 +289,7 @@ kind: Pod
 spec:
   containers:
     - name: git
-      image: alpine/git:latest
+      image: alpine/git:v2.54.0
       command: ["cat"]
       tty: true
 '''
@@ -397,7 +397,7 @@ kind: Pod
 spec:
   containers:
     - name: kaniko-web
-      image: gcr.io/kaniko-project/executor:debug
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
       command: ["cat"]
       tty: true
       resources:
@@ -409,7 +409,7 @@ spec:
           memory: "2Gi"
 
     - name: kaniko-nginx
-      image: gcr.io/kaniko-project/executor:debug
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
       command: ["cat"]
       tty: true
       resources:
