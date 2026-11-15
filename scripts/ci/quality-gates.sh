@@ -94,7 +94,7 @@ gate_kubeconform() {
   echo "-- per-file result (text mode lists skipped kinds; JSON mode did not):"
   docker run --rm -v "$ROOT/rendered":/m:ro "$KUBECONFORM_IMG" \
     -kubernetes-version "$K8S_VERSION" -strict -ignore-missing-schemas -output text -verbose /m 2>&1 \
-    | grep -E 'skipped|invalid|error' | sed 's/^/   /\'
+    | grep -E 'skipped|invalid|error' | sed 's/^/   /'
   echo "-- negative control: the OLD ingress from main must be rejected"
   git show main:k8s-aws/ingress.yaml | docker run --rm -i "$KUBECONFORM_IMG" \
     -kubernetes-version "$K8S_VERSION" -strict -ignore-missing-schemas -summary - 2>&1 | tail -4
