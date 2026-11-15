@@ -15,7 +15,7 @@ docker run -d --name cc-redis --network "$NET" redis:7.4.12-alpine >/dev/null
 docker run --rm --network "$NET" -v "$PWD/campuscart-backend":/src:ro \
   -e DB_HOST=cc-pg -e DB_PORT=5432 -e DB_NAME=test_campuscart_db -e DB_USER=test_user -e DB_PASSWORD=test_pass \
   -e REDIS_HOST=cc-redis -e REDIS_PORT=6379 -e DJANGO_SECRET_KEY=ci-test-only-not-a-real-secret-00000000 \
-  -e DEBUG=True -e ALLOWED_HOSTS=localhost,127.0.0.1 -e COV_VERSION="$COV_VERSION" \
+  -e DEBUG=True -e ALLOWED_HOSTS=localhost,127.0.0.1 -e COV_VERSION="$COV_VERSION" -e COV_FLOOR="${COV_FLOOR:-70}" \
   python:3.12.16-slim sh -c '
     set -e
     mkdir /app && cd /src && tar --exclude=venv --exclude=.env --exclude="*.env" --exclude=__pycache__ -cf - . | tar -C /app -xf -
@@ -28,6 +28,6 @@ docker run --rm --network "$NET" -v "$PWD/campuscart-backend":/src:ro \
     set +e
     coverage run --source=. --omit="*/migrations/*,*/tests.py,*/tests/*,*/test_*.py,manage.py" manage.py test --noinput
     echo "test exit code: $?"
-    coverage report --skip-empty --fail-under=70 > /tmp/cov.txt; echo "coverage gate (fail under 70) exit code: $?"
+    coverage report --skip-empty --fail-under=$COV_FLOOR > /tmp/cov.txt; echo "coverage gate (fail under $COV_FLOOR) exit code: $?"
     tail -45 /tmp/cov.txt
   '
