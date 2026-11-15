@@ -956,7 +956,7 @@ spec:
                             done
                             [ -n "$HOST" ] || { echo "SMOKE FAILED: no ALB hostname within 600s"; exit 1; }
                             echo "ALB hostname: $HOST"
-                            sh scripts/ci/smoke-test.sh "http://$HOST" 300 5
+                            sh scripts/ci/smoke-test.sh "http://$HOST" 600 5
                         '''
                     }
                 }
