@@ -21,6 +21,11 @@ CHECKS=(
   "deploy-aws|alpine/k8s:1.31.13|sh|aws|aws --version"
   "build-kaniko|gcr.io/kaniko-project/executor:v1.24.0-debug|/busybox/sh|/kaniko/executor|/kaniko/executor version"
   "notify|alpine/k8s:1.31.13|sh|curl|curl --version"
+  "gate-gitleaks|zricethezav/gitleaks:v8.30.1|sh|cat gitleaks|gitleaks version"
+  "gate-hadolint|hadolint/hadolint:v2.15.1-alpine|sh|cat hadolint|hadolint --version"
+  "gate-kubeconform|ghcr.io/yannh/kubeconform:v0.8.0-alpine|sh|cat /kubeconform|/kubeconform -v"
+  "gate-tflint|ghcr.io/terraform-linters/tflint:v0.66.0|sh|cat tflint|tflint --version"
+  "gate-checkov|bridgecrew/checkov:3.4.5|sh|cat checkov|checkov --version"
 )
 
 check_tools() {
