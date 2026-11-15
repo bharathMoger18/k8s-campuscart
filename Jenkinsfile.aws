@@ -75,6 +75,12 @@ spec:
                         env.WEB_TAG = webTag
                         env.NGINX_TAG = nginxTag
 
+                        // Used by the notifications (Phase 7) and the release annotations.
+                        env.GIT_SHA = head
+                        env.BRANCH_LABEL = branch ?: 'unknown'
+                        def author = sh(script: 'git log -1 --format=%an', returnStdout: true).trim()
+                        env.AUTHOR = author ?: 'unknown'
+
                         // Without an ECR lookup we assume "not built yet", so Test and Scan always run.
                         env.WEB_EXISTS = 'false'
                         env.NGINX_EXISTS = 'false'
@@ -969,6 +975,68 @@ spec:
                               -n "$APP_NS" \
                               --timeout=120s
                         '''
+
+                        // 5. Label the new revisions. A new revision copies the change-cause that is on the Deployment at that
+                        //    moment, so this must run AFTER the rollout. It never fails the build.
+                        sh 'sh scripts/ci/annotate-release.sh "$APP_NS"'
+                    }
+                }
+            }
+        }
+
+        stage('Smoke Test') {
+            // Real HTTP requests through the ALB (plain HTTP, no HTTPS yet). A failure fails the build, and
+            // post { failure } then restores the previous revisions (ROLLBACK_ARMED is an env.* value set in Deploy).
+            options { timeout(time: 25, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kubectl
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
+                container('kubectl') {
+                    unstash 'source'
+
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-campuscart-ci'
+                    ]]) {
+                        retry(2) {
+                            sh '''
+                                aws eks update-kubeconfig \
+                                  --name "$CLUSTER_NAME" \
+                                  --region "$AWS_REGION"
+                            '''
+                        }
+
+                        sh '''
+                            # The ALB hostname can take minutes to appear: bounded wait, 10 minutes.
+                            end=$(( $(date +%s) + 600 ))
+                            HOST=""
+                            while [ "$(date +%s)" -lt "$end" ]; do
+                                HOST=$(kubectl get ingress campuscart-ingress -n "$APP_NS" \
+                                  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+                                [ -n "$HOST" ] && break
+                                echo "waiting for the ALB hostname..."
+                                sleep 10
+                            done
+                            [ -n "$HOST" ] || { echo "SMOKE FAILED: no ALB hostname within 600s"; exit 1; }
+                            echo "ALB hostname: $HOST"
+                            sh scripts/ci/smoke-test.sh "http://$HOST" 300 5
+                        '''
                     }
                 }
             }
@@ -978,6 +1046,22 @@ spec:
     post {
         success {
             echo "Build #${env.BUILD_NUMBER} OK (RUN_AWS=${params.RUN_AWS}, branch main: ${env.IS_MAIN}), backend ${env.WEB_TAG}, nginx ${env.NGINX_TAG}."
+            script { notifyBuild('SUCCESS', '') }
+        }
+
+        unstable {
+            script { notifyBuild('UNSTABLE', '') }
+        }
+
+        aborted {
+            // A timeout or a manual abort does NOT run the failure block. Decision A: notify only, and print the manual
+            // rollback command. The pipeline does not roll back behind a human's back.
+            echo "CampusCart AWS build #${env.BUILD_NUMBER} ABORTED: ${env.BUILD_URL}"
+            script {
+                def hint = manualRollbackHint()
+                echo hint
+                notifyBuild('ABORTED', hint)
+            }
         }
 
         failure {
@@ -1005,10 +1089,18 @@ spec:
 ''') {
                             node(POD_LABEL) {
                                 container('tools') {
+                                    def haveSource = true
+                                    try {
+                                        unstash 'source'
+                                    } catch (srcErr) {
+                                        haveSource = false
+                                        echo "source stash not available, cannot roll back or notify: ${srcErr.message}"
+                                    }
+
                                     // Roll back first, then notify. A failed rollback must still reach the notification.
-                                    if (env.ROLLBACK_ARMED == 'true') {
+                                    def note = ''
+                                    if (haveSource && env.ROLLBACK_ARMED == 'true') {
                                         try {
-                                            unstash 'source'
                                             withCredentials([[
                                                 $class: 'AmazonWebServicesCredentialsBinding',
                                                 credentialsId: 'aws-campuscart-ci'
@@ -1023,25 +1115,15 @@ spec:
                                                       "campuscart-nginx:${NGINX_REV_BEFORE}"
                                                 '''
                                             }
+                                            note = 'Automatic rollback ran (see the build log).'
                                         } catch (rbErr) {
                                             echo "ROLLBACK FAILED, fix the cluster by hand: ${rbErr.message}"
+                                            note = 'ROLLBACK FAILED, fix the cluster by hand. ' + manualRollbackHint()
                                         }
                                     }
 
-                                    withCredentials([
-                                        string(
-                                            credentialsId: 'notify-webhook',
-                                            variable: 'HOOK'
-                                        )
-                                    ]) {
-                                        sh '''
-                                            MSG="CampusCart AWS build #${BUILD_NUMBER} FAILED: ${BUILD_URL}"
-                                            printf '{"text":"%s"}' "$MSG" > /tmp/payload.json
-                                            curl -fsS -X POST \
-                                              -H 'Content-Type: application/json' \
-                                              --data @/tmp/payload.json \
-                                              "$HOOK"
-                                        '''
+                                    if (haveSource) {
+                                        runNotify('FAILURE', note)
                                     }
                                 }
                             }
@@ -1052,5 +1134,81 @@ spec:
                 }
             }
         }
+    }
+}
+
+// ---- helpers used by post { } ----------------------------------------------------------------------------------
+
+// Prints the commands a human can run if the deploy was cut short. Uses only values recorded in the Deploy stage.
+def manualRollbackHint() {
+    if (env.ROLLBACK_ARMED != 'true') {
+        return 'Rollback was not armed: this build had not changed any Deployment yet.'
+    }
+    def parts = []
+    if (env.WEB_REV_BEFORE) {
+        parts << ('kubectl rollout undo deployment/campuscart-backend -n ' + env.APP_NS + ' --to-revision=' + env.WEB_REV_BEFORE)
+    }
+    if (env.NGINX_REV_BEFORE) {
+        parts << ('kubectl rollout undo deployment/campuscart-nginx -n ' + env.APP_NS + ' --to-revision=' + env.NGINX_REV_BEFORE)
+    }
+    if (parts.isEmpty()) {
+        return 'Deploy had started but no earlier revisions were recorded (first deploy): inspect the cluster by hand.'
+    }
+    return 'The deploy may be half done. Manual rollback: ' + parts.join(' ; ') + ' (database migrations are NOT rolled back).'
+}
+
+// Needs to run inside a node with the repo unstashed and a container that has jq and curl. Never fails the build.
+def runNotify(String result, String extra) {
+    try {
+        withCredentials([string(credentialsId: 'notify-webhook', variable: 'HOOK')]) {
+            withEnv([
+                'RESULT=' + result,
+                'JOB_NAME=' + (env.JOB_NAME ?: 'unknown'),
+                'BRANCH=' + (env.BRANCH_LABEL ?: 'unknown'),
+                'AUTHOR=' + (env.AUTHOR ?: 'unknown'),
+                'BUILD_NUMBER=' + (env.BUILD_NUMBER ?: '?'),
+                'BUILD_URL=' + (env.BUILD_URL ?: ''),
+                'DURATION=' + currentBuild.durationString.replace(' and counting', ''),
+                'RUN_AWS=' + params.RUN_AWS,
+                'WEB_TAG=' + (env.WEB_TAG ?: '?'),
+                'NGINX_TAG=' + (env.NGINX_TAG ?: '?'),
+                'EXTRA=' + extra
+            ]) {
+                sh 'sh scripts/ci/notify.sh'
+            }
+        }
+    } catch (e) {
+        echo "notification skipped: ${e.message}"
+    }
+}
+
+// Own pod, for result blocks that have no agent of their own.
+def notifyBuild(String result, String extra) {
+    try {
+        timeout(time: 5, unit: 'MINUTES') {
+            podTemplate(yaml: '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+''') {
+                node(POD_LABEL) {
+                    container('tools') {
+                        unstash 'source'
+                        runNotify(result, extra)
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        echo "notification skipped: ${e.message}"
     }
 }
