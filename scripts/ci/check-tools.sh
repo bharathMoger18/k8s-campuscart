@@ -26,6 +26,8 @@ CHECKS=(
   "gate-kubeconform|ghcr.io/yannh/kubeconform:v0.8.0-alpine|sh|cat /kubeconform|/kubeconform -v"
   "gate-tflint|ghcr.io/terraform-linters/tflint:v0.66.0|sh|cat tflint|tflint --version"
   "gate-checkov|bridgecrew/checkov:3.4.5|sh|cat checkov|checkov --version"
+  "gate-trivy|aquasec/trivy:0.76.2|sh|cat sh trivy|trivy --version"
+  "push-crane|gcr.io/go-containerregistry/crane@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b|/busybox/sh|cat /ko-app/crane|/ko-app/crane version"
 )
 
 check_tools() {
