@@ -1,0 +1,17 @@
+{
+ "format_version": "1.2",
+ "resource_changes": [
+  {
+   "address": "module.eks.aws_eks_cluster.main",
+   "mode": "managed",
+   "type": "aws_eks_cluster",
+   "name": "main",
+   "change": {
+    "actions": [
+     "delete",
+     "create"
+    ]
+   }
+  }
+ ]
+}

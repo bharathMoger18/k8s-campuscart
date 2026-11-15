@@ -1,15 +1,37 @@
-
 pipeline {
     agent none
+
+    options {
+        // Two builds must never touch the same cluster at once. A waiting build queues, it is not aborted.
+        disableConcurrentBuilds()
+        // Safety net so a hung build cannot block the queue forever. The stage timeouts below are tighter.
+        timeout(time: 180, unit: 'MINUTES')
+        // Keep the last 20 builds so the Jenkins disk does not fill up.
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        // Prefix every console line with the time, so slow steps are easy to find.
+        timestamps()
+    }
+
+    parameters {
+        booleanParam(
+            name: 'RUN_AWS',
+            defaultValue: false,
+            description: 'Run the stages that touch AWS (ECR, EKS). Leave unchecked for a fully local run.'
+        )
+    }
 
     environment {
         AWS_REGION   = 'ap-south-1'
         CLUSTER_NAME = 'campuscart-eks'
+        APP_NS       = 'campuscart'
+        // EDIT ME: Jenkins user IDs or group names (comma separated) allowed to click Apply / Deploy.
+        APPROVERS    = 'devops-approvers'
     }
 
     stages {
 
         stage('Checkout') {
+            options { timeout(time: 10, unit: 'MINUTES') }
             agent {
                 kubernetes {
                     yaml '''
@@ -18,12 +40,7 @@ kind: Pod
 spec:
   containers:
     - name: git
-      image: alpine/git:latest
-      command: ["cat"]
-      tty: true
-
-    - name: aws-cli
-      image: amazon/aws-cli:2.17.0
+      image: alpine/git:v2.54.0
       command: ["cat"]
       tty: true
 '''
@@ -31,11 +48,15 @@ spec:
             }
             steps {
                 container('git') {
-                    checkout scm
-
-                    sh 'git config --global --add safe.directory "$(pwd)"'
-
                     script {
+                        def scmVars = checkout scm
+                        sh 'git config --global --add safe.directory "$(pwd)"'
+
+                        // Works for multibranch (BRANCH_NAME) and for a plain Pipeline-from-SCM job (GIT_BRANCH).
+                        def branch = env.BRANCH_NAME ?: (scmVars.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+                        env.IS_MAIN = (branch == 'main') ? 'true' : 'false'
+                        echo "branch '${branch}' -> IS_MAIN=${env.IS_MAIN} (only main may push, apply or deploy, and only with RUN_AWS)"
+
                         def head = sh(
                             script: 'git rev-parse HEAD | cut -c1-7',
                             returnStdout: true
@@ -53,43 +74,16 @@ spec:
 
                         env.WEB_TAG = webTag
                         env.NGINX_TAG = nginxTag
-                    }
-                }
 
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-campuscart-ci'
-                ]]) {
-                    container('aws-cli') {
-                        script {
-                            def webStatus = sh(
-                                script: '''
-                                    aws ecr describe-images \
-                                      --region "$AWS_REGION" \
-                                      --repository-name campuscart-backend \
-                                      --image-ids imageTag="$WEB_TAG" \
-                                      >/dev/null 2>&1
-                                ''',
-                                returnStatus: true
-                            )
+                        // Used by the notifications (Phase 7) and the release annotations.
+                        env.GIT_SHA = head
+                        env.BRANCH_LABEL = branch ?: 'unknown'
+                        def author = sh(script: 'git log -1 --format=%an', returnStdout: true).trim()
+                        env.AUTHOR = author ?: 'unknown'
 
-                            def nginxStatus = sh(
-                                script: '''
-                                    aws ecr describe-images \
-                                      --region "$AWS_REGION" \
-                                      --repository-name campuscart-nginx \
-                                      --image-ids imageTag="$NGINX_TAG" \
-                                      >/dev/null 2>&1
-                                ''',
-                                returnStatus: true
-                            )
-
-                            env.WEB_EXISTS = webStatus == 0 ? 'true' : 'false'
-                            env.NGINX_EXISTS = nginxStatus == 0 ? 'true' : 'false'
-
-                            echo "Backend tag ${env.WEB_TAG} (already in ECR: ${env.WEB_EXISTS})"
-                            echo "Nginx tag ${env.NGINX_TAG} (already in ECR: ${env.NGINX_EXISTS})"
-                        }
+                        // Without an ECR lookup we assume "not built yet", so Test and Scan always run.
+                        env.WEB_EXISTS = 'false'
+                        env.NGINX_EXISTS = 'false'
                     }
                 }
 
@@ -97,10 +91,58 @@ spec:
             }
         }
 
-        stage('Test') {
+        stage('Check ECR') {
+            options { timeout(time: 5, unit: 'MINUTES') }
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' }
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: aws-cli
+      image: amazon/aws-cli:2.17.0
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-campuscart-ci'
+                ]]) {
+                    container('aws-cli') {
+                        unstash 'source'
+                        script {
+                            // ecr-check.sh prints true/false. Only ImageNotFoundException means "false";
+                            // any other aws error fails this stage with the real message.
+                            env.WEB_EXISTS = sh(
+                                script: 'sh scripts/ci/ecr-check.sh check campuscart-backend "$WEB_TAG"',
+                                returnStdout: true
+                            ).trim()
+                            env.NGINX_EXISTS = sh(
+                                script: 'sh scripts/ci/ecr-check.sh check campuscart-nginx "$NGINX_TAG"',
+                                returnStdout: true
+                            ).trim()
+
+                            echo "Backend tag ${env.WEB_TAG} (already in ECR: ${env.WEB_EXISTS})"
+                            echo "Nginx tag ${env.NGINX_TAG} (already in ECR: ${env.NGINX_EXISTS})"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Test') {
+            options { timeout(time: 30, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
             }
             agent {
                 kubernetes {
@@ -110,7 +152,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.12-slim
+      image: python:3.12.16-slim
       command: ["cat"]
       tty: true
       resources:
@@ -143,7 +185,7 @@ spec:
           value: "localhost,127.0.0.1"
 
     - name: postgres
-      image: postgres:15-alpine
+      image: postgres:15.20-alpine
       env:
         - name: POSTGRES_DB
           value: "test_campuscart_db"
@@ -157,7 +199,7 @@ spec:
           memory: "256Mi"
 
     - name: redis
-      image: redis:7-alpine
+      image: redis:7.4.12-alpine
       resources:
         requests:
           cpu: "100m"
@@ -169,10 +211,14 @@ spec:
                 container('python') {
                     unstash 'source'
 
-                    sh '''
-                        apt-get update -qq
-                        apt-get install -y -qq netcat-openbsd > /dev/null
+                    retry(2) {
+                        sh '''
+                            apt-get update -qq
+                            apt-get install -y -qq netcat-openbsd > /dev/null
+                        '''
+                    }
 
+                    sh '''
                         until nc -z localhost 5432; do
                             echo "Waiting for Postgres..."
                             sleep 2
@@ -186,23 +232,30 @@ spec:
                         echo "Postgres and Redis are ready."
                     '''
 
-                    sh '''
-                        cd campuscart-backend
-                        pip install --no-cache-dir -r requirements.txt
-                    '''
+                    retry(2) {
+                        sh '''
+                            export PIP_TIMEOUT=300 PIP_RETRIES=5
+                            cd campuscart-backend
+                            pip install --no-cache-dir -r requirements.txt coverage==7.17.3
+                        '''
+                    }
 
                     sh '''
                         cd campuscart-backend
-                        python manage.py test --noinput --verbosity=2
+                        # Same file filter as scripts/ci/coverage-baseline.sh (migrations and test files do not count).
+                        coverage run --source=. --omit="*/migrations/*,*/tests.py,*/tests/*,*/test_*.py,manage.py" manage.py test --noinput --verbosity=2
+                        # Measured baseline is 75%; the floor is 70% so a real drop fails the build.
+                        coverage report --skip-empty --fail-under=70
                     '''
                 }
             }
         }
 
         stage('Security Scan') {
+            options { timeout(time: 15, unit: 'MINUTES') }
             when {
                 beforeAgent true
-                expression { env.WEB_EXISTS != 'true' }
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
             }
             agent {
                 kubernetes {
@@ -212,7 +265,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.12-slim
+      image: python:3.12.16-slim
       command: ["cat"]
       tty: true
       resources:
@@ -229,25 +282,158 @@ spec:
                 container('python') {
                     unstash 'source'
 
-                    sh '''
-                        pip install --no-cache-dir -q pip-audit bandit
+                    retry(2) {
+                        sh '''
+                            export PIP_TIMEOUT=300 PIP_RETRIES=5
+                            pip install --no-cache-dir -q pip-audit bandit
 
-                        cd campuscart-backend
+                            cd campuscart-backend
 
-                        # Fail on MEDIUM severity and above.
-                        bandit -r . -q -ll
+                            # Fail on MEDIUM severity and above.
+                            bandit -r . -q -ll
 
-                        # Fail on known vulnerabilities in pinned requirements.
-                        pip-audit -r requirements.txt --no-deps --disable-pip
-                    '''
+                            # Fail on known vulnerabilities in pinned requirements (this call asks the network).
+                            pip-audit --timeout 120 -r requirements.txt --no-deps --disable-pip
+                        '''
+                    }
                 }
             }
         }
 
-        stage('Terraform Plan') {
-            agent {
-                kubernetes {
-                    yaml '''
+        stage('Quality Gates') {
+            // Runs on every branch and never touches AWS. Each gate is one pod that calls scripts/ci/gate.sh,
+            // the same script (in the same pinned images) that scripts/ci/rehearse-gates.sh runs locally.
+            parallel {
+
+                stage('Secrets scan') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: gitleaks
+      image: zricethezav/gitleaks:v8.30.1
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('gitleaks') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh gitleaks'
+                        }
+                    }
+                }
+
+                stage('Python lint') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: python
+      image: python:3.12.16-slim
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('python') {
+                            unstash 'source'
+                            retry(2) { sh 'sh scripts/ci/gate.sh ruff-install' }
+                            sh 'sh scripts/ci/gate.sh ruff'
+                        }
+                    }
+                }
+
+                stage('Dockerfile lint') {
+                    options { timeout(time: 5, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: hadolint
+      image: hadolint/hadolint:v2.15.1-alpine
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('hadolint') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh hadolint'
+                        }
+                    }
+                }
+
+                stage('Manifest validation') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+    - name: kubeconform
+      image: ghcr.io/yannh/kubeconform:v0.8.0-alpine
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('tools') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh render'
+                        }
+                        container('kubeconform') {
+                            retry(2) { sh 'sh scripts/ci/gate.sh kubeconform' }
+                        }
+                    }
+                }
+
+                stage('Terraform validate') {
+                    options { timeout(time: 15, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
 apiVersion: v1
 kind: Pod
 spec:
@@ -256,98 +442,211 @@ spec:
       image: hashicorp/terraform:1.10.5
       command: ["cat"]
       tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('terraform') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh terraform-fmt'
+                            retry(2) { sh 'sh scripts/ci/gate.sh terraform-init' }
+                            sh 'sh scripts/ci/gate.sh terraform-validate'
+                        }
+                    }
+                }
+
+                stage('Terraform lint') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tflint
+      image: ghcr.io/terraform-linters/tflint:v0.66.0
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('tflint') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh tflint'
+                        }
+                    }
+                }
+
+                stage('IaC policy scan (soft-fail)') {
+                    options { timeout(time: 15, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+    - name: checkov
+      image: bridgecrew/checkov:3.4.5
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('tools') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh render'
+                        }
+                        container('checkov') {
+                            sh 'sh scripts/ci/gate.sh checkov'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Images (Kaniko, no push)') {
+            // Runs on every branch. No registry, no AWS, no credentials: Kaniko writes one tarball per image plus its sha256.
+            options { timeout(time: 60, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kaniko-web
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+
+    - name: kaniko-nginx
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
 '''
                 }
             }
             steps {
-                container('terraform') {
+                unstash 'source'
+
+                // Nginx first: its build context is the repo root, so image-out must not hold the big backend tarball yet.
+                script {
+                    if (env.NGINX_EXISTS != 'true') {
+                        container('kaniko-nginx') {
+                            sh 'sh scripts/ci/kaniko-build.sh nginx "$NGINX_TAG" "$PWD/image-out"'
+                        }
+                    } else {
+                        echo "Nginx image ${env.NGINX_TAG} already in ECR; not building."
+                    }
+                    if (env.WEB_EXISTS != 'true') {
+                        container('kaniko-web') {
+                            sh 'sh scripts/ci/kaniko-build.sh backend "$WEB_TAG" "$PWD/image-out"'
+                        }
+                    } else {
+                        echo "Backend image ${env.WEB_TAG} already in ECR; not building."
+                    }
+                }
+
+                stash name: 'images', includes: 'image-out/*'
+            }
+        }
+
+        stage('Trivy Gate') {
+            // Scans the exact tarballs that the push stage will upload. A failure here stops the build before any push.
+            options { timeout(time: 20, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: trivy
+      image: aquasec/trivy:0.76.2
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+'''
+                }
+            }
+            steps {
+                container('trivy') {
                     unstash 'source'
+                    unstash 'images'
 
-                    withCredentials([[
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-campuscart-ci'
-                    ]]) {
-                        dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
-                            sh 'terraform plan -input=false -out=tfplan'
-                            sh 'terraform show -no-color tfplan > tfplan.txt'
-                        }
-                    }
+                    // The tarballs travelled through a stash: prove they are still what Kaniko wrote.
+                    sh 'cd image-out && sha256sum -c *.sha256'
 
-                    stash name: 'tfplan',
-                        includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
-                }
-            }
-        }
+                    // Only the vulnerability-DB download is retried. A real finding must fail once, not twice.
+                    retry(2) { sh 'sh scripts/ci/trivy-gate.sh db' }
 
-        stage('Show Terraform Plan') {
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: git
-      image: alpine/git:latest
-      command: ["cat"]
-      tty: true
-'''
-                }
-            }
-            steps {
-                container('git') {
-                    unstash 'tfplan'
-                    sh 'cat terraform/environments/production/tfplan.txt'
-                }
-            }
-        }
+                    // Non-blocking: every HIGH/CRITICAL including the ones that have no fix yet, so nothing is hidden.
+                    sh 'sh scripts/ci/trivy-gate.sh report image-out/*.tar'
 
-        stage('Approve Infrastructure Changes') {
-            agent none
-
-            steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    input(
-                        message: 'Review the Terraform plan above. Apply these infrastructure changes?'
-                    )
-                }
-            }
-        }
-
-        stage('Terraform Apply') {
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: terraform
-      image: hashicorp/terraform:1.10.5
-      command: ["cat"]
-      tty: true
-'''
-                }
-            }
-            steps {
-                container('terraform') {
-                    unstash 'tfplan'
-
-                    withCredentials([[
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-campuscart-ci'
-                    ]]) {
-                        dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
-                            sh 'terraform apply -input=false tfplan'
-                        }
-                    }
+                    // Blocking: HIGH/CRITICAL that have a fix. .trivyignore entries must carry an expiry.
+                    sh 'sh scripts/ci/trivy-gate.sh gate image-out/*.tar'
                 }
             }
         }
 
         stage('Prepare AWS Context') {
+            options { timeout(time: 5, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -369,10 +668,12 @@ spec:
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
                         script {
-                            env.AWS_ACCOUNT_ID = sh(
-                                script: 'aws sts get-caller-identity --query Account --output text',
-                                returnStdout: true
-                            ).trim()
+                            retry(2) {
+                                env.AWS_ACCOUNT_ID = sh(
+                                    script: 'aws sts get-caller-identity --query Account --output text',
+                                    returnStdout: true
+                                ).trim()
+                            }
 
                             env.ECR_REGISTRY =
                                 "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
@@ -382,11 +683,15 @@ spec:
             }
         }
 
-        stage('Build and Push Images') {
+        stage('Push Images (crane)') {
+            // Pushes the SAME tarballs that passed the Trivy Gate in this build. ECR tags are immutable, so an image
+            // that already exists is skipped (Check ECR) and never rebuilt or overwritten.
+            options { timeout(time: 20, unit: 'MINUTES') }
             when {
                 beforeAgent true
                 expression {
-                    env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true'
+                    params.RUN_AWS && env.IS_MAIN == 'true' &&
+                    (env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true')
                 }
             }
             agent {
@@ -396,75 +701,68 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - name: kaniko-web
-      image: gcr.io/kaniko-project/executor:debug
+    - name: aws-cli
+      image: amazon/aws-cli:2.17.0
       command: ["cat"]
       tty: true
-      resources:
-        requests:
-          cpu: "500m"
-          memory: "1Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
 
-    - name: kaniko-nginx
-      image: gcr.io/kaniko-project/executor:debug
+    - name: crane
+      image: gcr.io/go-containerregistry/crane@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b
       command: ["cat"]
       tty: true
       resources:
         requests:
-          cpu: "250m"
-          memory: "512Mi"
-        limits:
-          cpu: "1"
-          memory: "1Gi"
+          cpu: "100m"
+          memory: "256Mi"
 '''
                 }
             }
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-campuscart-ci'
-                ]]) {
-                    container('kaniko-web') {
-                        unstash 'source'
+                unstash 'source'
+                unstash 'images'
 
-                        sh '''
-                            if [ "$WEB_EXISTS" = "true" ]; then
-                                echo "Backend image ${WEB_TAG} already exists; skipping build."
-                                exit 0
-                            fi
-
-                            /kaniko/executor \
-                              --context=dir://$(pwd)/campuscart-backend \
-                              --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-backend:${WEB_TAG} \
-                              --cache=true
-                        '''
+                // Only this container ever sees the AWS key. It leaves a short-lived registry token for crane.
+                container('aws-cli') {
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-campuscart-ci'
+                    ]]) {
+                        retry(2) { sh 'aws ecr get-login-password --region "$AWS_REGION" > ecr-login.txt' }
                     }
+                }
 
-                    container('kaniko-nginx') {
-                        unstash 'source'
+                container('crane') {
+                    script {
+                        try {
+                            sh '''
+                                set -eu
+                                export DOCKER_CONFIG=/tmp/crane-docker
+                                mkdir -p "$DOCKER_CONFIG"
+                                crane auth login "$ECR_REGISTRY" --username AWS --password-stdin < ecr-login.txt
 
-                        sh '''
-                            if [ "$NGINX_EXISTS" = "true" ]; then
-                                echo "Nginx image ${NGINX_TAG} already exists; skipping build."
-                                exit 0
-                            fi
-
-                            /kaniko/executor \
-                              --context=dir://$(pwd) \
-                              --dockerfile=$(pwd)/nginx/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-nginx:${NGINX_TAG} \
-                              --cache=true
-                        '''
+                                if [ "$WEB_EXISTS" != "true" ]; then
+                                    sh scripts/ci/push-image.sh image-out/campuscart-backend.tar \
+                                      "$ECR_REGISTRY/campuscart-backend:$WEB_TAG" image-out/campuscart-backend.tar.sha256
+                                fi
+                                if [ "$NGINX_EXISTS" != "true" ]; then
+                                    sh scripts/ci/push-image.sh image-out/campuscart-nginx.tar \
+                                      "$ECR_REGISTRY/campuscart-nginx:$NGINX_TAG" image-out/campuscart-nginx.tar.sha256
+                                fi
+                            '''
+                        } finally {
+                            sh 'rm -f ecr-login.txt'
+                        }
                     }
                 }
             }
         }
 
         stage('Render Manifests') {
+            options { timeout(time: 5, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -472,80 +770,48 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - name: terraform
-      image: hashicorp/terraform:1.10.5
+    - name: tools
+      image: alpine/k8s:1.31.13
       command: ["cat"]
       tty: true
 '''
                 }
             }
             steps {
-                container('terraform') {
+                container('tools') {
                     unstash 'source'
-
-                    withCredentials([[
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-campuscart-ci'
-                    ]]) {
-                        dir('terraform/environments/production') {
-                            sh 'terraform init -input=false'
-
-                            script {
-                                env.RDS_ENDPOINT = sh(
-                                    script: 'terraform output -raw db_endpoint',
-                                    returnStdout: true
-                                ).trim()
-
-                                env.REDIS_ENDPOINT = sh(
-                                    script: 'terraform output -raw redis_endpoint',
-                                    returnStdout: true
-                                ).trim()
-
-                                env.ECR_BACKEND_IMAGE = sh(
-                                    script: """terraform output -json ecr_repository_urls | jq -r '.["campuscart-backend"]'""",
-                                    returnStdout: true
-                                ).trim()
-
-                                env.ECR_NGINX_IMAGE = sh(
-                                    script: """terraform output -json ecr_repository_urls | jq -r '.["campuscart-nginx"]'""",
-                                    returnStdout: true
-                                ).trim()
-                            }
-                        }
-                    }
-
-                    sh '''
-                        mkdir -p rendered
-
-                        for f in k8s-aws/*.yaml; do
-                            filename=$(basename "$f")
-
-                            case "$filename" in
-                                nginx-deployment.yaml)
-                                    IMAGE_TAG="$NGINX_TAG" \
-                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
-                                      < "$f" > "rendered/$filename"
-                                    ;;
-                                backend-deployment.yaml|migrate-job.yaml)
-                                    IMAGE_TAG="$WEB_TAG" \
-                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
-                                      < "$f" > "rendered/$filename"
-                                    ;;
-                                *)
-                                    IMAGE_TAG="$WEB_TAG" \
-                                    envsubst '${RDS_ENDPOINT} ${REDIS_ENDPOINT} ${ECR_BACKEND_IMAGE} ${ECR_NGINX_IMAGE} ${IMAGE_TAG} ${WEB_TAG} ${NGINX_TAG}' \
-                                      < "$f" > "rendered/$filename"
-                                    ;;
-                            esac
-                        done
-                    '''
+                    // RDS and Redis endpoints come from config/aws-production.env (non-secret, committed, updated after a
+                    // infrastructure run). ECR URLs are built from the account id found in Prepare AWS Context.
+                    sh 'sh scripts/ci/render-from-config.sh'
 
                     stash name: 'rendered-manifests', includes: 'rendered/**'
                 }
             }
         }
 
+        stage('Approve Production Deploy') {
+            when {
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent none
+
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: "Deploy backend ${env.WEB_TAG} and nginx ${env.NGINX_TAG} to ${env.CLUSTER_NAME} (namespace ${env.APP_NS})? The migration Job runs first. Database migrations are NOT rolled back automatically.",
+                        ok: 'Deploy',
+                        submitter: env.APPROVERS
+                    )
+                }
+            }
+        }
+
         stage('Deploy to EKS') {
+            options { timeout(time: 25, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
             agent {
                 kubernetes {
                     yaml '''
@@ -554,7 +820,7 @@ kind: Pod
 spec:
   containers:
     - name: kubectl
-      image: amazon/aws-cli:2.17.0
+      image: alpine/k8s:1.31.13
       command: ["cat"]
       tty: true
 '''
@@ -562,40 +828,135 @@ spec:
             }
             steps {
                 container('kubectl') {
+                    unstash 'source'
                     unstash 'rendered-manifests'
 
                     withCredentials([[
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-campuscart-ci'
                     ]]) {
-                        sh '''
-                            aws eks update-kubeconfig \
-                              --name "$CLUSTER_NAME" \
-                              --region "$AWS_REGION"
-                        '''
+                        retry(2) {
+                            sh '''
+                                aws eks update-kubeconfig \
+                                  --name "$CLUSTER_NAME" \
+                                  --region "$AWS_REGION"
+                            '''
+                        }
 
+                        // 1. Namespace, config and secret plumbing. The migration Job needs the DB Secret to exist.
                         sh '''
                             kubectl apply -f rendered/namespace.yaml
                             kubectl apply -f rendered/configmap.yaml
+                            kubectl apply -f rendered/nginx-configmap.yaml
                             kubectl apply -f rendered/serviceaccount.yaml
                             kubectl apply -f rendered/secretstore.yaml
                             kubectl apply -f rendered/externalsecret.yaml
-                            kubectl apply -f rendered/backend-deployment.yaml
+                            kubectl wait --for=condition=Ready externalsecret/campuscart-db-secret \
+                              -n "$APP_NS" --timeout=180s
                             kubectl apply -f rendered/backend-service.yaml
-                            kubectl apply -f rendered/nginx-deployment.yaml
                             kubectl apply -f rendered/nginx-service.yaml
                             kubectl apply -f rendered/ingress.yaml
+                        '''
+
+                        // 2. Remember what is running NOW, before this build changes anything.
+                        //    post { failure } only restores Deployments whose revision moved past these numbers.
+                        script {
+                            env.WEB_REV_BEFORE = sh(
+                                script: 'sh scripts/ci/rollback.sh revision "$APP_NS" campuscart-backend',
+                                returnStdout: true
+                            ).trim()
+                            env.NGINX_REV_BEFORE = sh(
+                                script: 'sh scripts/ci/rollback.sh revision "$APP_NS" campuscart-nginx',
+                                returnStdout: true
+                            ).trim()
+                            env.ROLLBACK_ARMED = 'true'
+                            echo "Revisions before deploy: backend=${env.WEB_REV_BEFORE ?: 'none'} nginx=${env.NGINX_REV_BEFORE ?: 'none'}"
+                        }
+
+                        // 3. Database migration FIRST. If it fails, the deploy stops here and no Deployment is touched.
+                        sh '''
+                            kubectl delete job campuscart-migrate -n "$APP_NS" --ignore-not-found
+                            kubectl apply -f rendered/migrate-job.yaml
+                            sh scripts/ci/wait-for-job.sh "$APP_NS" campuscart-migrate 300
+                        '''
+
+                        // 4. New Deployments, then wait for them.
+                        sh '''
+                            kubectl apply -f rendered/backend-deployment.yaml
+                            kubectl apply -f rendered/nginx-deployment.yaml
                             kubectl apply -f rendered/hpa.yaml
                         '''
 
                         sh '''
                             kubectl rollout status deployment/campuscart-backend \
-                              -n campuscart \
-                              --timeout=180s
+                              -n "$APP_NS" \
+                              --timeout=300s
 
                             kubectl rollout status deployment/campuscart-nginx \
-                              -n campuscart \
+                              -n "$APP_NS" \
                               --timeout=120s
+                        '''
+
+                        // 5. Label the new revisions. A new revision copies the change-cause that is on the Deployment at that
+                        //    moment, so this must run AFTER the rollout. It never fails the build.
+                        sh 'sh scripts/ci/annotate-release.sh "$APP_NS"'
+                    }
+                }
+            }
+        }
+
+        stage('Smoke Test') {
+            // Real HTTP requests through the ALB (plain HTTP, no HTTPS yet). A failure fails the build, and
+            // post { failure } then restores the previous revisions (ROLLBACK_ARMED is an env.* value set in Deploy).
+            options { timeout(time: 25, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kubectl
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
+                container('kubectl') {
+                    unstash 'source'
+
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-campuscart-ci'
+                    ]]) {
+                        retry(2) {
+                            sh '''
+                                aws eks update-kubeconfig \
+                                  --name "$CLUSTER_NAME" \
+                                  --region "$AWS_REGION"
+                            '''
+                        }
+
+                        sh '''
+                            # The ALB hostname can take minutes to appear: bounded wait, 10 minutes.
+                            end=$(( $(date +%s) + 600 ))
+                            HOST=""
+                            while [ "$(date +%s)" -lt "$end" ]; do
+                                HOST=$(kubectl get ingress campuscart-ingress -n "$APP_NS" \
+                                  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+                                [ -n "$HOST" ] && break
+                                echo "waiting for the ALB hostname..."
+                                sleep 10
+                            done
+                            [ -n "$HOST" ] || { echo "SMOKE FAILED: no ALB hostname within 600s"; exit 1; }
+                            echo "ALB hostname: $HOST"
+                            sh scripts/ci/smoke-test.sh "http://$HOST" 600 5
                         '''
                     }
                 }
@@ -605,7 +966,23 @@ spec:
 
     post {
         success {
-            echo "Deployed backend ${env.WEB_TAG} and nginx ${env.NGINX_TAG} to EKS successfully."
+            echo "Build #${env.BUILD_NUMBER} OK (RUN_AWS=${params.RUN_AWS}, branch main: ${env.IS_MAIN}), backend ${env.WEB_TAG}, nginx ${env.NGINX_TAG}."
+            script { notifyBuild('SUCCESS', '') }
+        }
+
+        unstable {
+            script { notifyBuild('UNSTABLE', '') }
+        }
+
+        aborted {
+            // A timeout or a manual abort does NOT run the failure block. Decision A: notify only, and print the manual
+            // rollback command. The pipeline does not roll back behind a human's back.
+            echo "CampusCart AWS build #${env.BUILD_NUMBER} ABORTED: ${env.BUILD_URL}"
+            script {
+                def hint = manualRollbackHint()
+                echo hint
+                notifyBuild('ABORTED', hint)
+            }
         }
 
         failure {
@@ -613,49 +990,146 @@ spec:
 
             script {
                 try {
-                    timeout(time: 3, unit: 'MINUTES') {
+                    timeout(time: 15, unit: 'MINUTES') {
                         podTemplate(yaml: '''
 apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - name: curl
-      image: alpine/k8s:1.29.15
+    - name: tools
+      image: alpine/k8s:1.31.13
       command: ["cat"]
       tty: true
       resources:
         requests:
-          cpu: "50m"
-          memory: "64Mi"
-        limits:
-          cpu: "200m"
+          cpu: "100m"
           memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
 ''') {
                             node(POD_LABEL) {
-                                container('curl') {
-                                    withCredentials([
-                                        string(
-                                            credentialsId: 'notify-webhook',
-                                            variable: 'HOOK'
-                                        )
-                                    ]) {
-                                        sh '''
-                                            MSG="CampusCart AWS build #${BUILD_NUMBER} FAILED: ${BUILD_URL}"
-                                            printf '{"text":"%s"}' "$MSG" > /tmp/payload.json
-                                            curl -fsS -X POST \
-                                              -H 'Content-Type: application/json' \
-                                              --data @/tmp/payload.json \
-                                              "$HOOK"
-                                        '''
+                                container('tools') {
+                                    def haveSource = true
+                                    try {
+                                        unstash 'source'
+                                    } catch (srcErr) {
+                                        haveSource = false
+                                        echo "source stash not available, cannot roll back or notify: ${srcErr.message}"
+                                    }
+
+                                    // Roll back first, then notify. A failed rollback must still reach the notification.
+                                    def note = ''
+                                    if (haveSource && env.ROLLBACK_ARMED == 'true') {
+                                        try {
+                                            withCredentials([[
+                                                $class: 'AmazonWebServicesCredentialsBinding',
+                                                credentialsId: 'aws-campuscart-ci'
+                                            ]]) {
+                                                sh '''
+                                                    aws eks update-kubeconfig \
+                                                      --name "$CLUSTER_NAME" \
+                                                      --region "$AWS_REGION"
+
+                                                    sh scripts/ci/rollback.sh undo "$APP_NS" \
+                                                      "campuscart-backend:${WEB_REV_BEFORE}" \
+                                                      "campuscart-nginx:${NGINX_REV_BEFORE}"
+                                                '''
+                                            }
+                                            note = 'Automatic rollback ran (see the build log).'
+                                        } catch (rbErr) {
+                                            echo "ROLLBACK FAILED, fix the cluster by hand: ${rbErr.message}"
+                                            note = 'ROLLBACK FAILED, fix the cluster by hand. ' + manualRollbackHint()
+                                        }
+                                    }
+
+                                    if (haveSource) {
+                                        runNotify('FAILURE', note)
                                     }
                                 }
                             }
                         }
                     }
                 } catch (err) {
-                    echo "Failure notification skipped: ${err.message}"
+                    echo "Failure handling skipped: ${err.message}"
                 }
             }
         }
+    }
+}
+
+// ---- helpers used by post { } ----------------------------------------------------------------------------------
+
+// Prints the commands a human can run if the deploy was cut short. Uses only values recorded in the Deploy stage.
+def manualRollbackHint() {
+    if (env.ROLLBACK_ARMED != 'true') {
+        return 'Rollback was not armed: this build had not changed any Deployment yet.'
+    }
+    def parts = []
+    if (env.WEB_REV_BEFORE) {
+        parts << ('kubectl rollout undo deployment/campuscart-backend -n ' + env.APP_NS + ' --to-revision=' + env.WEB_REV_BEFORE)
+    }
+    if (env.NGINX_REV_BEFORE) {
+        parts << ('kubectl rollout undo deployment/campuscart-nginx -n ' + env.APP_NS + ' --to-revision=' + env.NGINX_REV_BEFORE)
+    }
+    if (parts.isEmpty()) {
+        return 'Deploy had started but no earlier revisions were recorded (first deploy): inspect the cluster by hand.'
+    }
+    return 'The deploy may be half done. Manual rollback: ' + parts.join(' ; ') + ' (database migrations are NOT rolled back).'
+}
+
+// Needs to run inside a node with the repo unstashed and a container that has jq and curl. Never fails the build.
+def runNotify(String result, String extra) {
+    try {
+        withCredentials([string(credentialsId: 'notify-webhook', variable: 'HOOK')]) {
+            withEnv([
+                'RESULT=' + result,
+                'JOB_NAME=' + (env.JOB_NAME ?: 'unknown'),
+                'BRANCH=' + (env.BRANCH_LABEL ?: 'unknown'),
+                'AUTHOR=' + (env.AUTHOR ?: 'unknown'),
+                'BUILD_NUMBER=' + (env.BUILD_NUMBER ?: '?'),
+                'BUILD_URL=' + (env.BUILD_URL ?: ''),
+                'DURATION=' + currentBuild.durationString.replace(' and counting', ''),
+                'RUN_AWS=' + params.RUN_AWS,
+                'WEB_TAG=' + (env.WEB_TAG ?: '?'),
+                'NGINX_TAG=' + (env.NGINX_TAG ?: '?'),
+                'EXTRA=' + extra
+            ]) {
+                sh 'sh scripts/ci/notify.sh'
+            }
+        }
+    } catch (e) {
+        echo "notification skipped: ${e.message}"
+    }
+}
+
+// Own pod, for result blocks that have no agent of their own.
+def notifyBuild(String result, String extra) {
+    try {
+        timeout(time: 5, unit: 'MINUTES') {
+            podTemplate(yaml: '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+''') {
+                node(POD_LABEL) {
+                    container('tools') {
+                        unstash 'source'
+                        runNotify(result, extra)
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        echo "notification skipped: ${e.message}"
     }
 }

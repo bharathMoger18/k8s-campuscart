@@ -26,14 +26,24 @@ spec:
       labels:
         app: campuscart-nginx
     spec:
+      automountServiceAccountToken: false # this workload never calls the Kubernetes API
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: nginx
           image: "${ECR_NGINX_IMAGE}:${IMAGE_TAG}"
           imagePullPolicy: Always
 
           ports:
-            - containerPort: 80
+            - containerPort: 8080 # non-root (uid 101) cannot bind port 80
               name: http
+
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/campuscart.conf
+              subPath: campuscart.conf
+              readOnly: true
 
           resources:
             requests:
@@ -45,15 +55,15 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /
-              port: 80
+              path: /healthz
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 20
 
           readinessProbe:
             httpGet:
-              path: /
-              port: 80
+              path: /healthz
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
 
@@ -61,3 +71,10 @@ spec:
             runAsNonRoot: true
             runAsUser: 101 # nginx's own conventional non-root UID inside the official nginx image
             allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: campuscart-nginx-conf

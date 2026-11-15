@@ -1,0 +1,9 @@
+# Known findings in commit c8bb03b (2026-07-18): real values in both .env.example files and push_test.html.
+# Owner decision (interview demo project): accepted, not rotated, history not rewritten.
+# Only these exact fingerprints are ignored. Any NEW secret still fails the gate.
+c8bb03b262884ebf1e5fa6931eb9b4231d4e9d21:.env.example:generic-api-key:33
+c8bb03b262884ebf1e5fa6931eb9b4231d4e9d21:campuscart-backend/.env.example:generic-api-key:2
+c8bb03b262884ebf1e5fa6931eb9b4231d4e9d21:campuscart-backend/templates/push_test.html:jwt:14
+# The known findings that still exist in the working tree, as seen by 'gitleaks dir' (the Jenkins gate has no git history):
+campuscart-backend/.env.example:generic-api-key:2
+campuscart-backend/templates/push_test.html:jwt:14

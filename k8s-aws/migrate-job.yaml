@@ -1,0 +1,50 @@
+# =============================================================================
+# k8s-aws/migrate-job.yaml
+# =============================================================================
+# Runs once per deploy, BEFORE the new backend Deployment is applied. Same ECR image as the backend;
+# MIGRATE_ONLY=true makes entrypoint.sh run migrate + collectstatic and exit instead of starting Daphne.
+# Jobs are immutable, so the pipeline deletes the previous Job before applying this one.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: campuscart-migrate
+  namespace: campuscart
+spec:
+  backoffLimit: 0 # entrypoint.sh already retries migrate 5 times; a failed Job must fail the deploy, not retry silently
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: campuscart-migrate
+    spec:
+      serviceAccountName: campuscart-app-sa
+      automountServiceAccountToken: false # this workload never calls the Kubernetes API
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "${ECR_BACKEND_IMAGE}:${IMAGE_TAG}"
+          imagePullPolicy: Always
+          env:
+            - name: MIGRATE_ONLY
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: campuscart-config
+            - secretRef:
+                name: campuscart-db-secret
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
