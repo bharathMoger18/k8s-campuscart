@@ -18,6 +18,10 @@ spec:
         app: campuscart-migrate
     spec:
       serviceAccountName: campuscart-app-sa
+      automountServiceAccountToken: false # this workload never calls the Kubernetes API
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       restartPolicy: Never
       containers:
         - name: migrate
@@ -42,3 +46,5 @@ spec:
             runAsNonRoot: true
             runAsUser: 100
             allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
