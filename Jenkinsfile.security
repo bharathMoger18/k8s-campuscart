@@ -22,7 +22,7 @@ kind: Pod
 spec:
   containers:
   - name: python
-    image: python:3.12-slim
+    image: python:3.12.16-slim
     command: ["cat"]
     tty: true
     resources:
@@ -38,7 +38,7 @@ spec:
             steps {
                 container('python') {
                     sh '''
-                        pip install --no-cache-dir -q pip-audit
+                        pip install --no-cache-dir -q pip-audit==2.10.1
                         pip-audit -r campuscart-backend/requirements.txt --no-deps --disable-pip
                     '''
                 }
