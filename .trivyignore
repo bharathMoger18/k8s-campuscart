@@ -1,0 +1,7 @@
+# Trivy risk acceptances for the CampusCart image gate (rules: docs/SUPPLY-CHAIN.md).
+# Every entry needs these three comment lines directly above it:
+#   # reason: why it is accepted or not exploitable here
+#   # owner: who answers for it
+#   # expires: YYYY-MM-DD   (also written as exp:YYYY-MM-DD on the ID line, so Trivy itself enforces it)
+# Entry format:  CVE-YYYY-NNNN exp:YYYY-MM-DD
+# No active entries today. The gate runs with --ignore-unfixed, which already skips CVEs that have no fix yet.

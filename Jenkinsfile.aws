@@ -111,31 +111,18 @@ spec:
                     credentialsId: 'aws-campuscart-ci'
                 ]]) {
                     container('aws-cli') {
+                        unstash 'source'
                         script {
-                            def webStatus = sh(
-                                script: '''
-                                    aws ecr describe-images \
-                                      --region "$AWS_REGION" \
-                                      --repository-name campuscart-backend \
-                                      --image-ids imageTag="$WEB_TAG" \
-                                      >/dev/null 2>&1
-                                ''',
-                                returnStatus: true
-                            )
-
-                            def nginxStatus = sh(
-                                script: '''
-                                    aws ecr describe-images \
-                                      --region "$AWS_REGION" \
-                                      --repository-name campuscart-nginx \
-                                      --image-ids imageTag="$NGINX_TAG" \
-                                      >/dev/null 2>&1
-                                ''',
-                                returnStatus: true
-                            )
-
-                            env.WEB_EXISTS = webStatus == 0 ? 'true' : 'false'
-                            env.NGINX_EXISTS = nginxStatus == 0 ? 'true' : 'false'
+                            // ecr-check.sh prints true/false. Only ImageNotFoundException means "false";
+                            // any other aws error fails this stage with the real message.
+                            env.WEB_EXISTS = sh(
+                                script: 'sh scripts/ci/ecr-check.sh check campuscart-backend "$WEB_TAG"',
+                                returnStdout: true
+                            ).trim()
+                            env.NGINX_EXISTS = sh(
+                                script: 'sh scripts/ci/ecr-check.sh check campuscart-nginx "$NGINX_TAG"',
+                                returnStdout: true
+                            ).trim()
 
                             echo "Backend tag ${env.WEB_TAG} (already in ECR: ${env.WEB_EXISTS})"
                             echo "Nginx tag ${env.NGINX_TAG} (already in ECR: ${env.NGINX_EXISTS})"
@@ -303,6 +290,119 @@ spec:
                             pip-audit --timeout 120 -r requirements.txt --no-deps --disable-pip
                         '''
                     }
+                }
+            }
+        }
+
+        stage('Build Images (Kaniko, no push)') {
+            // Runs on every branch. No registry, no AWS, no credentials: Kaniko writes one tarball per image plus its sha256.
+            options { timeout(time: 60, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kaniko-web
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+
+    - name: kaniko-nginx
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+'''
+                }
+            }
+            steps {
+                unstash 'source'
+
+                // Nginx first: its build context is the repo root, so image-out must not hold the big backend tarball yet.
+                script {
+                    if (env.NGINX_EXISTS != 'true') {
+                        container('kaniko-nginx') {
+                            sh 'sh scripts/ci/kaniko-build.sh nginx "$NGINX_TAG" "$PWD/image-out"'
+                        }
+                    } else {
+                        echo "Nginx image ${env.NGINX_TAG} already in ECR; not building."
+                    }
+                    if (env.WEB_EXISTS != 'true') {
+                        container('kaniko-web') {
+                            sh 'sh scripts/ci/kaniko-build.sh backend "$WEB_TAG" "$PWD/image-out"'
+                        }
+                    } else {
+                        echo "Backend image ${env.WEB_TAG} already in ECR; not building."
+                    }
+                }
+
+                stash name: 'images', includes: 'image-out/*'
+            }
+        }
+
+        stage('Trivy Gate') {
+            // Scans the exact tarballs that the push stage will upload. A failure here stops the build before any push.
+            options { timeout(time: 20, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: trivy
+      image: aquasec/trivy:0.76.2
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+'''
+                }
+            }
+            steps {
+                container('trivy') {
+                    unstash 'source'
+                    unstash 'images'
+
+                    // The tarballs travelled through a stash: prove they are still what Kaniko wrote.
+                    sh 'cd image-out && sha256sum -c *.sha256'
+
+                    // Only the vulnerability-DB download is retried. A real finding must fail once, not twice.
+                    retry(2) { sh 'sh scripts/ci/trivy-gate.sh db' }
+
+                    // Non-blocking: every HIGH/CRITICAL including the ones that have no fix yet, so nothing is hidden.
+                    sh 'sh scripts/ci/trivy-gate.sh report image-out/*.tar'
+
+                    // Blocking: HIGH/CRITICAL that have a fix. .trivyignore entries must carry an expiry.
+                    sh 'sh scripts/ci/trivy-gate.sh gate image-out/*.tar'
                 }
             }
         }
@@ -700,8 +800,10 @@ spec:
             }
         }
 
-        stage('Build and Push Images') {
-            options { timeout(time: 30, unit: 'MINUTES') }
+        stage('Push Images (crane)') {
+            // Pushes the SAME tarballs that passed the Trivy Gate in this build. ECR tags are immutable, so an image
+            // that already exists is skipped (Check ECR) and never rebuilt or overwritten.
+            options { timeout(time: 20, unit: 'MINUTES') }
             when {
                 beforeAgent true
                 expression {
@@ -716,69 +818,57 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - name: kaniko-web
-      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+    - name: aws-cli
+      image: amazon/aws-cli:2.17.0
       command: ["cat"]
       tty: true
-      resources:
-        requests:
-          cpu: "500m"
-          memory: "1Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
 
-    - name: kaniko-nginx
-      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+    - name: crane
+      image: gcr.io/go-containerregistry/crane@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b
       command: ["cat"]
       tty: true
       resources:
         requests:
-          cpu: "250m"
-          memory: "512Mi"
-        limits:
-          cpu: "1"
-          memory: "1Gi"
+          cpu: "100m"
+          memory: "256Mi"
 '''
                 }
             }
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-campuscart-ci'
-                ]]) {
-                    container('kaniko-web') {
-                        unstash 'source'
+                unstash 'source'
+                unstash 'images'
 
-                        sh '''
-                            if [ "$WEB_EXISTS" = "true" ]; then
-                                echo "Backend image ${WEB_TAG} already exists; skipping build."
-                                exit 0
-                            fi
-
-                            /kaniko/executor \
-                              --context=dir://$(pwd)/campuscart-backend \
-                              --dockerfile=$(pwd)/campuscart-backend/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-backend:${WEB_TAG} \
-                              --cache=true
-                        '''
+                // Only this container ever sees the AWS key. It leaves a short-lived registry token for crane.
+                container('aws-cli') {
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-campuscart-ci'
+                    ]]) {
+                        retry(2) { sh 'aws ecr get-login-password --region "$AWS_REGION" > ecr-login.txt' }
                     }
+                }
 
-                    container('kaniko-nginx') {
-                        unstash 'source'
+                container('crane') {
+                    script {
+                        try {
+                            sh '''
+                                set -eu
+                                export DOCKER_CONFIG=/tmp/crane-docker
+                                mkdir -p "$DOCKER_CONFIG"
+                                crane auth login "$ECR_REGISTRY" --username AWS --password-stdin < ecr-login.txt
 
-                        sh '''
-                            if [ "$NGINX_EXISTS" = "true" ]; then
-                                echo "Nginx image ${NGINX_TAG} already exists; skipping build."
-                                exit 0
-                            fi
-
-                            /kaniko/executor \
-                              --context=dir://$(pwd) \
-                              --dockerfile=$(pwd)/nginx/Dockerfile \
-                              --destination=${ECR_REGISTRY}/campuscart-nginx:${NGINX_TAG} \
-                              --cache=true
-                        '''
+                                if [ "$WEB_EXISTS" != "true" ]; then
+                                    sh scripts/ci/push-image.sh image-out/campuscart-backend.tar \
+                                      "$ECR_REGISTRY/campuscart-backend:$WEB_TAG" image-out/campuscart-backend.tar.sha256
+                                fi
+                                if [ "$NGINX_EXISTS" != "true" ]; then
+                                    sh scripts/ci/push-image.sh image-out/campuscart-nginx.tar \
+                                      "$ECR_REGISTRY/campuscart-nginx:$NGINX_TAG" image-out/campuscart-nginx.tar.sha256
+                                fi
+                            '''
+                        } finally {
+                            sh 'rm -f ecr-login.txt'
+                        }
                     }
                 }
             }
