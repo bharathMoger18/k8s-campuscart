@@ -52,7 +52,7 @@ kind: Pod
 spec:
   containers:
   - name: trivy
-    image: aquasec/trivy:latest
+    image: aquasec/trivy:0.76.1
     command: ["cat"]
     tty: true
     resources:
