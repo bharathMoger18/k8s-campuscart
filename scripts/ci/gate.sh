@@ -52,8 +52,11 @@ case "${1:-}" in
 
   checkov)
     # Soft-fail: findings are printed, nothing blocks yet.
-    checkov -d terraform -d rendered -f campuscart-backend/Dockerfile -f nginx/Dockerfile \
-      --framework terraform dockerfile kubernetes --compact --quiet --soft-fail ;;
+    checkov -d terraform -d rendered --framework terraform kubernetes --compact --quiet --soft-fail
+    echo "-- Dockerfiles (separate run, so a silent skip is visible)"
+    checkov -f campuscart-backend/Dockerfile -f nginx/Dockerfile --framework dockerfile --compact --quiet --soft-fail > /tmp/checkov-docker.txt 2>&1 || true
+    cat /tmp/checkov-docker.txt
+    grep -q 'dockerfile scan results' /tmp/checkov-docker.txt || echo "WARNING: checkov reported no Dockerfile results; the Dockerfiles may not have been scanned" ;;
 
   *)
     echo "usage: gate.sh render|gitleaks|ruff-install|ruff|hadolint|kubeconform|terraform-fmt|terraform-init|terraform-validate|tflint|checkov" >&2
