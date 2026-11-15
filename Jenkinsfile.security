@@ -54,7 +54,7 @@ spec:
   serviceAccountName: jenkins-deployer
   containers:
   - name: kubectl
-    image: alpine/k8s:1.29.15
+    image: alpine/k8s:1.30.14
     command: ["cat"]
     tty: true
     resources:
@@ -116,7 +116,7 @@ kind: Pod
 spec:
   containers:
   - name: curl
-    image: alpine/k8s:1.29.15
+    image: alpine/k8s:1.30.14
     command: ["cat"]
     tty: true
     resources:
