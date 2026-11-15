@@ -1,0 +1,16 @@
+{
+ "format_version": "1.2",
+ "resource_changes": [
+  {
+   "address": "aws_s3_bucket.terraform_state",
+   "mode": "managed",
+   "type": "aws_s3_bucket",
+   "name": "terraform_state",
+   "change": {
+    "actions": [
+     "delete"
+    ]
+   }
+  }
+ ]
+}

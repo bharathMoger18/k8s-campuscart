@@ -1,0 +1,16 @@
+{
+ "format_version": "1.2",
+ "resource_changes": [
+  {
+   "address": "module.networking.aws_vpc.main",
+   "mode": "managed",
+   "type": "aws_vpc",
+   "name": "main",
+   "change": {
+    "actions": [
+     "delete"
+    ]
+   }
+  }
+ ]
+}

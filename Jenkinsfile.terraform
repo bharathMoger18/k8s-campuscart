@@ -1,0 +1,250 @@
+// Terraform pipeline: plan, approval and apply for terraform/environments/<ENVIRONMENT>.
+// Manual trigger only. A webhook build gets RUN_AWS=false (the default) and only runs the no-AWS validation.
+// How to configure the Jenkins job: docs/TERRAFORM-PIPELINE.md
+pipeline {
+    agent none
+
+    options {
+        // Two builds must never touch the same Terraform state at once. A waiting build queues, it is not aborted.
+        disableConcurrentBuilds()
+        timeout(time: 150, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timestamps()
+    }
+
+    parameters {
+        booleanParam(
+            name: 'RUN_AWS',
+            defaultValue: false,
+            description: 'Plan and apply against AWS. Leave unchecked for fmt, init -backend=false and validate only.'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['production', 'production-addons'],
+            description: 'Which terraform/environments/<name> directory to plan and apply.'
+        )
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+        // EDIT ME: Jenkins user IDs or group names (comma separated) allowed to click Apply.
+        APPROVERS = 'devops-approvers'
+        // Today the same static key as the app pipeline. A Terraform-only credential is a Phase 8 decision.
+        TF_AWS_CREDENTIALS_ID = 'aws-campuscart-ci'
+        TF_DIR = "terraform/environments/${params.ENVIRONMENT}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            options { timeout(time: 10, unit: 'MINUTES') }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: git
+      image: alpine/git:v2.54.0
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
+                container('git') {
+                    script {
+                        def scmVars = checkout scm
+                        sh 'git config --global --add safe.directory "$(pwd)"'
+                        def branch = env.BRANCH_NAME ?: (scmVars.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+                        env.IS_MAIN = (branch == 'main') ? 'true' : 'false'
+                        echo "branch '${branch}' -> IS_MAIN=${env.IS_MAIN}, RUN_AWS=${params.RUN_AWS}, ENVIRONMENT=${params.ENVIRONMENT}"
+                    }
+                }
+                stash name: 'source', includes: '**'
+            }
+        }
+
+        stage('Validate (no AWS)') {
+            // Runs on every branch and never touches AWS: the same gate.sh commands as Jenkinsfile.aws.
+            options { timeout(time: 15, unit: 'MINUTES') }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+'''
+                }
+            }
+            steps {
+                container('terraform') {
+                    unstash 'source'
+                    sh 'sh scripts/ci/gate.sh terraform-fmt'
+                    retry(2) { sh 'sh scripts/ci/gate.sh terraform-init' }
+                    sh 'sh scripts/ci/gate.sh terraform-validate'
+                }
+            }
+        }
+
+        stage('Plan') {
+            options { timeout(time: 25, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
+            }
+            agent {
+                kubernetes {
+                    // Both containers share the workspace: terraform writes the plan, tools (jq) reads it.
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+'''
+                }
+            }
+            steps {
+                container('terraform') {
+                    unstash 'source'
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.TF_AWS_CREDENTIALS_ID
+                    ]]) {
+                        retry(2) { sh 'terraform -chdir="$TF_DIR" init -input=false' }
+                        script {
+                            // tf-plan.sh exits 0 (no changes), 2 (changes) or 1 (error). returnStatus keeps exit 2 from failing the step.
+                            env.PLAN_RC = sh(script: 'sh scripts/ci/tf-plan.sh "$TF_DIR"', returnStatus: true).toString()
+                            if (env.PLAN_RC != '0' && env.PLAN_RC != '2') {
+                                error('terraform plan failed (see the log above)')
+                            }
+                        }
+                    }
+                }
+                container('tools') {
+                    script {
+                        try {
+                            if (env.PLAN_RC == '2') {
+                                sh 'cat "$TF_DIR/tfplan.txt"'
+                                env.GUARD_RC = sh(script: 'sh scripts/ci/plan-guard.sh "$TF_DIR/tfplan.json"', returnStatus: true).toString()
+                                if (env.GUARD_RC != '0' && env.GUARD_RC != '3') {
+                                    error('plan-guard could not read the plan')
+                                }
+                                stash name: 'tfplan', includes: "${env.TF_DIR}/tfplan,${env.TF_DIR}/tfplan.txt"
+                            } else {
+                                echo 'No infrastructure changes: approval and apply are skipped.'
+                            }
+                        } finally {
+                            // The JSON plan can contain secret values. It is never stashed or printed.
+                            sh 'rm -f "$TF_DIR/tfplan.json"'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Approve Infrastructure Changes') {
+            when {
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' && env.PLAN_RC == '2' }
+            }
+            agent none
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: "Review the plan printed in the Plan stage. Apply these ${params.ENVIRONMENT} infrastructure changes?",
+                        ok: 'Apply',
+                        submitter: env.APPROVERS
+                    )
+                }
+                script {
+                    if (env.GUARD_RC == '3') {
+                        timeout(time: 30, unit: 'MINUTES') {
+                            def typed = input(
+                                message: 'DANGER: the plan deletes or replaces a database, VPC, EKS cluster or S3 bucket (see the WARNING in the Plan stage). Type DESTROY-OK to apply anyway.',
+                                ok: 'I understand, apply',
+                                submitter: env.APPROVERS,
+                                parameters: [string(name: 'CONFIRM', defaultValue: '', description: 'Type DESTROY-OK')]
+                            )
+                            if (typed != 'DESTROY-OK') {
+                                error('Second confirmation did not match. Nothing was applied.')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Apply') {
+            options { timeout(time: 45, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { params.RUN_AWS && env.IS_MAIN == 'true' && env.PLAN_RC == '2' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
+'''
+                }
+            }
+            steps {
+                container('terraform') {
+                    unstash 'source'
+                    unstash 'tfplan'
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.TF_AWS_CREDENTIALS_ID
+                    ]]) {
+                        retry(2) { sh 'terraform -chdir="$TF_DIR" init -input=false' }
+                        // No retry here: a half-finished apply must be looked at, not repeated.
+                        sh 'terraform -chdir="$TF_DIR" apply -input=false -lock-timeout=5m tfplan'
+                        script {
+                            if (params.ENVIRONMENT == 'production') {
+                                echo 'Copy the new rds/redis endpoints below into config/aws-production.env and commit it.'
+                                sh 'terraform -chdir="$TF_DIR" output || true'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Build #${env.BUILD_NUMBER} OK (RUN_AWS=${params.RUN_AWS}, ENVIRONMENT=${params.ENVIRONMENT}, plan exit code: ${env.PLAN_RC ?: 'not run'})."
+        }
+        failure {
+            echo "Terraform build #${env.BUILD_NUMBER} FAILED: ${env.BUILD_URL}. If it failed during Apply, check the state lock and the real infrastructure before rerunning."
+        }
+    }
+}

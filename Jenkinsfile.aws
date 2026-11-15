@@ -2,7 +2,7 @@ pipeline {
     agent none
 
     options {
-        // Two builds must never touch the same cluster or Terraform state at once. A waiting build queues, it is not aborted.
+        // Two builds must never touch the same cluster at once. A waiting build queues, it is not aborted.
         disableConcurrentBuilds()
         // Safety net so a hung build cannot block the queue forever. The stage timeouts below are tighter.
         timeout(time: 180, unit: 'MINUTES')
@@ -16,7 +16,7 @@ pipeline {
         booleanParam(
             name: 'RUN_AWS',
             defaultValue: false,
-            description: 'Run the stages that touch AWS (ECR, Terraform, EKS). Leave unchecked for a fully local run.'
+            description: 'Run the stages that touch AWS (ECR, EKS). Leave unchecked for a fully local run.'
         )
     }
 
@@ -635,129 +635,6 @@ spec:
             }
         }
 
-        stage('Terraform Plan') {
-            options { timeout(time: 20, unit: 'MINUTES') }
-            when {
-                beforeAgent true
-                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
-            }
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: terraform
-      image: hashicorp/terraform:1.10.5
-      command: ["cat"]
-      tty: true
-'''
-                }
-            }
-            steps {
-                container('terraform') {
-                    unstash 'source'
-
-                    withCredentials([[
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-campuscart-ci'
-                    ]]) {
-                        dir('terraform/environments/production') {
-                            retry(2) { sh 'terraform init -input=false' }
-                            sh 'terraform plan -input=false -out=tfplan'
-                            sh 'terraform show -no-color tfplan > tfplan.txt'
-                        }
-                    }
-
-                    stash name: 'tfplan',
-                        includes: 'terraform/environments/production/tfplan,terraform/environments/production/tfplan.txt'
-                }
-            }
-        }
-
-        stage('Show Terraform Plan') {
-            options { timeout(time: 5, unit: 'MINUTES') }
-            when {
-                beforeAgent true
-                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
-            }
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: git
-      image: alpine/git:v2.54.0
-      command: ["cat"]
-      tty: true
-'''
-                }
-            }
-            steps {
-                container('git') {
-                    unstash 'tfplan'
-                    sh 'cat terraform/environments/production/tfplan.txt'
-                }
-            }
-        }
-
-        stage('Approve Infrastructure Changes') {
-            when {
-                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
-            }
-            agent none
-
-            steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    input(
-                        message: 'Review the plan in the Show Terraform Plan stage. Look for any destroy or replace of RDS, VPC, EKS or state. Apply these infrastructure changes to production?',
-                        ok: 'Apply',
-                        submitter: env.APPROVERS
-                    )
-                }
-            }
-        }
-
-        stage('Terraform Apply') {
-            options { timeout(time: 45, unit: 'MINUTES') }
-            when {
-                beforeAgent true
-                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
-            }
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: terraform
-      image: hashicorp/terraform:1.10.5
-      command: ["cat"]
-      tty: true
-'''
-                }
-            }
-            steps {
-                container('terraform') {
-                    unstash 'tfplan'
-
-                    withCredentials([[
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-campuscart-ci'
-                    ]]) {
-                        dir('terraform/environments/production') {
-                            retry(2) { sh 'terraform init -input=false' }
-                            sh 'terraform apply -input=false tfplan'
-                        }
-                    }
-                }
-            }
-        }
-
         stage('Prepare AWS Context') {
             options { timeout(time: 5, unit: 'MINUTES') }
             when {
@@ -874,45 +751,6 @@ spec:
             }
         }
 
-        stage('Read Terraform Outputs') {
-            options { timeout(time: 10, unit: 'MINUTES') }
-            when {
-                beforeAgent true
-                expression { params.RUN_AWS && env.IS_MAIN == 'true' }
-            }
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: terraform
-      image: hashicorp/terraform:1.10.5
-      command: ["cat"]
-      tty: true
-'''
-                }
-            }
-            steps {
-                container('terraform') {
-                    unstash 'source'
-
-                    withCredentials([[
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-campuscart-ci'
-                    ]]) {
-                        dir('terraform/environments/production') {
-                            retry(2) { sh 'terraform init -input=false' }
-                            retry(2) { sh 'terraform output -json > "$WORKSPACE/tf-outputs.json"' }
-                        }
-                    }
-
-                    stash name: 'tf-outputs', includes: 'tf-outputs.json'
-                }
-            }
-        }
-
         stage('Render Manifests') {
             options { timeout(time: 5, unit: 'MINUTES') }
             when {
@@ -936,16 +774,9 @@ spec:
             steps {
                 container('tools') {
                     unstash 'source'
-                    unstash 'tf-outputs'
-
-                    sh '''
-                        RDS_ENDPOINT=$(jq -r '.db_endpoint.value' tf-outputs.json)
-                        REDIS_ENDPOINT=$(jq -r '.redis_endpoint.value' tf-outputs.json)
-                        ECR_BACKEND_IMAGE=$(jq -r '.ecr_repository_urls.value["campuscart-backend"]' tf-outputs.json)
-                        ECR_NGINX_IMAGE=$(jq -r '.ecr_repository_urls.value["campuscart-nginx"]' tf-outputs.json)
-                        export RDS_ENDPOINT REDIS_ENDPOINT ECR_BACKEND_IMAGE ECR_NGINX_IMAGE
-                        sh scripts/ci/render-manifests.sh
-                    '''
+                    // RDS and Redis endpoints come from config/aws-production.env (non-secret, committed, updated after a
+                    // infrastructure run). ECR URLs are built from the account id found in Prepare AWS Context.
+                    sh 'sh scripts/ci/render-from-config.sh'
 
                     stash name: 'rendered-manifests', includes: 'rendered/**'
                 }
