@@ -3,7 +3,8 @@
 #   sh scripts/ci/rollback.sh revision NAMESPACE DEPLOYMENT
 #       prints the Deployment's current revision (empty if it does not exist yet)
 #   sh scripts/ci/rollback.sh undo NAMESPACE DEPLOYMENT:REVISION_BEFORE [DEPLOYMENT:REVISION_BEFORE ...]
-#       restores REVISION_BEFORE, but only for Deployments this build actually changed
+#       restores REVISION_BEFORE, but only for Deployments this build actually changed, then sets the change-cause
+#       to "rolled back to revision N after failed build #M" (a restored revision otherwise keeps the FAILED build's cause)
 set -u
 
 revision_of() {
@@ -43,6 +44,12 @@ case "$cmd" in
         echo "== $dep: restored revision did not become ready"; rc=1; continue
       fi
       echo "== $dep: restored. Now on revision $(revision_of "$ns" "$dep") (same pod template as old revision $before)"
+      cause="rolled back to revision $before after failed build #${BUILD_NUMBER:-?}"
+      if kubectl -n "$ns" annotate "deployment/$dep" --overwrite "kubernetes.io/change-cause=$cause" >/dev/null; then
+        echo "== $dep: change-cause set: $cause"
+      else
+        echo "== $dep: WARNING could not set the change-cause (the rollback itself worked)"
+      fi
       kubectl rollout history "deployment/$dep" -n "$ns" | tail -4
     done
     exit "$rc"
