@@ -300,119 +300,6 @@ spec:
             }
         }
 
-        stage('Build Images (Kaniko, no push)') {
-            // Runs on every branch. No registry, no AWS, no credentials: Kaniko writes one tarball per image plus its sha256.
-            options { timeout(time: 60, unit: 'MINUTES') }
-            when {
-                beforeAgent true
-                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
-            }
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: kaniko-web
-      image: gcr.io/kaniko-project/executor:v1.24.0-debug
-      command: ["cat"]
-      tty: true
-      resources:
-        requests:
-          cpu: "500m"
-          memory: "1Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
-
-    - name: kaniko-nginx
-      image: gcr.io/kaniko-project/executor:v1.24.0-debug
-      command: ["cat"]
-      tty: true
-      resources:
-        requests:
-          cpu: "250m"
-          memory: "512Mi"
-        limits:
-          cpu: "1"
-          memory: "1Gi"
-'''
-                }
-            }
-            steps {
-                unstash 'source'
-
-                // Nginx first: its build context is the repo root, so image-out must not hold the big backend tarball yet.
-                script {
-                    if (env.NGINX_EXISTS != 'true') {
-                        container('kaniko-nginx') {
-                            sh 'sh scripts/ci/kaniko-build.sh nginx "$NGINX_TAG" "$PWD/image-out"'
-                        }
-                    } else {
-                        echo "Nginx image ${env.NGINX_TAG} already in ECR; not building."
-                    }
-                    if (env.WEB_EXISTS != 'true') {
-                        container('kaniko-web') {
-                            sh 'sh scripts/ci/kaniko-build.sh backend "$WEB_TAG" "$PWD/image-out"'
-                        }
-                    } else {
-                        echo "Backend image ${env.WEB_TAG} already in ECR; not building."
-                    }
-                }
-
-                stash name: 'images', includes: 'image-out/*'
-            }
-        }
-
-        stage('Trivy Gate') {
-            // Scans the exact tarballs that the push stage will upload. A failure here stops the build before any push.
-            options { timeout(time: 20, unit: 'MINUTES') }
-            when {
-                beforeAgent true
-                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
-            }
-            agent {
-                kubernetes {
-                    yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: trivy
-      image: aquasec/trivy:0.76.2
-      command: ["cat"]
-      tty: true
-      resources:
-        requests:
-          cpu: "250m"
-          memory: "512Mi"
-        limits:
-          cpu: "1"
-          memory: "2Gi"
-'''
-                }
-            }
-            steps {
-                container('trivy') {
-                    unstash 'source'
-                    unstash 'images'
-
-                    // The tarballs travelled through a stash: prove they are still what Kaniko wrote.
-                    sh 'cd image-out && sha256sum -c *.sha256'
-
-                    // Only the vulnerability-DB download is retried. A real finding must fail once, not twice.
-                    retry(2) { sh 'sh scripts/ci/trivy-gate.sh db' }
-
-                    // Non-blocking: every HIGH/CRITICAL including the ones that have no fix yet, so nothing is hidden.
-                    sh 'sh scripts/ci/trivy-gate.sh report image-out/*.tar'
-
-                    // Blocking: HIGH/CRITICAL that have a fix. .trivyignore entries must carry an expiry.
-                    sh 'sh scripts/ci/trivy-gate.sh gate image-out/*.tar'
-                }
-            }
-        }
-
         stage('Quality Gates') {
             // Runs on every branch and never touches AWS. Each gate is one pod that calls scripts/ci/gate.sh,
             // the same script (in the same pinned images) that scripts/ci/rehearse-gates.sh runs locally.
@@ -637,6 +524,119 @@ spec:
                             sh 'sh scripts/ci/gate.sh checkov'
                         }
                     }
+                }
+            }
+        }
+
+        stage('Build Images (Kaniko, no push)') {
+            // Runs on every branch. No registry, no AWS, no credentials: Kaniko writes one tarball per image plus its sha256.
+            options { timeout(time: 60, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kaniko-web
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+
+    - name: kaniko-nginx
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+'''
+                }
+            }
+            steps {
+                unstash 'source'
+
+                // Nginx first: its build context is the repo root, so image-out must not hold the big backend tarball yet.
+                script {
+                    if (env.NGINX_EXISTS != 'true') {
+                        container('kaniko-nginx') {
+                            sh 'sh scripts/ci/kaniko-build.sh nginx "$NGINX_TAG" "$PWD/image-out"'
+                        }
+                    } else {
+                        echo "Nginx image ${env.NGINX_TAG} already in ECR; not building."
+                    }
+                    if (env.WEB_EXISTS != 'true') {
+                        container('kaniko-web') {
+                            sh 'sh scripts/ci/kaniko-build.sh backend "$WEB_TAG" "$PWD/image-out"'
+                        }
+                    } else {
+                        echo "Backend image ${env.WEB_TAG} already in ECR; not building."
+                    }
+                }
+
+                stash name: 'images', includes: 'image-out/*'
+            }
+        }
+
+        stage('Trivy Gate') {
+            // Scans the exact tarballs that the push stage will upload. A failure here stops the build before any push.
+            options { timeout(time: 20, unit: 'MINUTES') }
+            when {
+                beforeAgent true
+                expression { env.WEB_EXISTS != 'true' || env.NGINX_EXISTS != 'true' }
+            }
+            agent {
+                kubernetes {
+                    yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: trivy
+      image: aquasec/trivy:0.76.2
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+'''
+                }
+            }
+            steps {
+                container('trivy') {
+                    unstash 'source'
+                    unstash 'images'
+
+                    // The tarballs travelled through a stash: prove they are still what Kaniko wrote.
+                    sh 'cd image-out && sha256sum -c *.sha256'
+
+                    // Only the vulnerability-DB download is retried. A real finding must fail once, not twice.
+                    retry(2) { sh 'sh scripts/ci/trivy-gate.sh db' }
+
+                    // Non-blocking: every HIGH/CRITICAL including the ones that have no fix yet, so nothing is hidden.
+                    sh 'sh scripts/ci/trivy-gate.sh report image-out/*.tar'
+
+                    // Blocking: HIGH/CRITICAL that have a fix. .trivyignore entries must carry an expiry.
+                    sh 'sh scripts/ci/trivy-gate.sh gate image-out/*.tar'
                 }
             }
         }
