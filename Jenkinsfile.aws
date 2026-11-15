@@ -243,13 +243,16 @@ spec:
                         sh '''
                             export PIP_TIMEOUT=300 PIP_RETRIES=5
                             cd campuscart-backend
-                            pip install --no-cache-dir -r requirements.txt
+                            pip install --no-cache-dir -r requirements.txt coverage==7.17.3
                         '''
                     }
 
                     sh '''
                         cd campuscart-backend
-                        python manage.py test --noinput --verbosity=2
+                        # Same file filter as scripts/ci/coverage-baseline.sh (migrations and test files do not count).
+                        coverage run --source=. --omit="*/migrations/*,*/tests.py,*/tests/*,*/test_*.py,manage.py" manage.py test --noinput --verbosity=2
+                        # Measured baseline is 75%; the floor is 70% so a real drop fails the build.
+                        coverage report --skip-empty --fail-under=70
                     '''
                 }
             }
@@ -299,6 +302,234 @@ spec:
                             # Fail on known vulnerabilities in pinned requirements (this call asks the network).
                             pip-audit --timeout 120 -r requirements.txt --no-deps --disable-pip
                         '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gates') {
+            // Runs on every branch and never touches AWS. Each gate is one pod that calls scripts/ci/gate.sh,
+            // the same script (in the same pinned images) that scripts/ci/rehearse-gates.sh runs locally.
+            parallel {
+
+                stage('Secrets scan') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: gitleaks
+      image: zricethezav/gitleaks:v8.30.1
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('gitleaks') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh gitleaks'
+                        }
+                    }
+                }
+
+                stage('Python lint') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: python
+      image: python:3.12.16-slim
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('python') {
+                            unstash 'source'
+                            retry(2) { sh 'sh scripts/ci/gate.sh ruff-install' }
+                            sh 'sh scripts/ci/gate.sh ruff'
+                        }
+                    }
+                }
+
+                stage('Dockerfile lint') {
+                    options { timeout(time: 5, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: hadolint
+      image: hadolint/hadolint:v2.15.1-alpine
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('hadolint') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh hadolint'
+                        }
+                    }
+                }
+
+                stage('Manifest validation') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+    - name: kubeconform
+      image: ghcr.io/yannh/kubeconform:v0.8.0-alpine
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('tools') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh render'
+                        }
+                        container('kubeconform') {
+                            retry(2) { sh 'sh scripts/ci/gate.sh kubeconform' }
+                        }
+                    }
+                }
+
+                stage('Terraform validate') {
+                    options { timeout(time: 15, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: terraform
+      image: hashicorp/terraform:1.10.5
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('terraform') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh terraform-fmt'
+                            retry(2) { sh 'sh scripts/ci/gate.sh terraform-init' }
+                            sh 'sh scripts/ci/gate.sh terraform-validate'
+                        }
+                    }
+                }
+
+                stage('Terraform lint') {
+                    options { timeout(time: 10, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tflint
+      image: ghcr.io/terraform-linters/tflint:v0.66.0
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('tflint') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh tflint'
+                        }
+                    }
+                }
+
+                stage('IaC policy scan (soft-fail)') {
+                    options { timeout(time: 15, unit: 'MINUTES') }
+                    agent {
+                        kubernetes {
+                            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: tools
+      image: alpine/k8s:1.31.13
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+    - name: checkov
+      image: bridgecrew/checkov:3.4.5
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+'''
+                        }
+                    }
+                    steps {
+                        container('tools') {
+                            unstash 'source'
+                            sh 'sh scripts/ci/gate.sh render'
+                        }
+                        container('checkov') {
+                            sh 'sh scripts/ci/gate.sh checkov'
+                        }
                     }
                 }
             }
